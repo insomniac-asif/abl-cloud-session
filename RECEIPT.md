@@ -90,3 +90,34 @@ tools/codex_manifest_audit.py      tools/tests/test_codex_manifest_audit.py
 fixes/_common.py  fix_fleet_ip.py  fix_errands_path.py  fix_one_project_context.py  diagnose_unit.py  tests/test_fixes.py
 deploy/deploy_abl1.sh
 ```
+
+---
+
+## Follow-up batch (after PR #1 merged, same session)
+
+| Item | Deliverable | Tests |
+|---|---|---|
+| Bills tier | RED → **YELLOW** (60 s review window). A bill that asks for money is still RED via the money rule. Drafts mentioning payments are still dropped | +4 |
+| Voice bridge | `src/voice_bridge.py`: desktop ears → abl1 `POST /api/abl/voice/heard`. Tailnet first, SSH tunnel fallback, health loop, per-endpoint backoff, failback to the primary, connect-phase-only failover (no double replies), 30 s offline buffer, deafen gate, tailnet/loopback-only targets | 33, against real local HTTP servers |
+| Settings panel spec | `specs/DSH_SETTINGS_PANEL_SPEC.md`: models, autopilot, quiet hours, tier overrides, speaker volume, built on one versioned settings store | n/a (spec) |
+| ears.py patch | `patches/patch_ears.py` + `patches/EARS_PATCH.md`: call-site rewiring through `voice_bridge.live()`, owner token only on ABL calls, idempotent, backup + compile guard | 13, incl. end-to-end tailnet-down → tunnel |
+| `:7800` scan | `reports/LOCALHOST_7800_SCAN.md`: 243 hits → 6 live call sites → **2 to change**, 4 correct as-is | n/a |
+
+**Corrections to earlier docs:** `/api/abl/voice/*` `_require_owner` **already accepts an
+Asif-owned bearer token**. The earlier "token branch must land first" claim was wrong, and is fixed in the spec §4.2 and
+BUG_FIXES B7. Spec §7's offline buffer is now 30 s, matching the implementation.
+
+**New findings that need action:**
+1. **Desktop gamemode can resurrect the stopped Odysseus.** `gamemode_watch._reconcile()` `pm2 start`s
+   `abl-backend`, `abl-watch`, `abl-fleet-registry` and `abl-node-health` every 10 s unless they are
+   `pm2 delete`d. Fix on the desktop: `pm2 delete abl-backend abl-watch abl-fleet-registry abl-node-health && pm2 save`.
+2. **The ears fallback port 7800 collides** with that same desktop Odysseus if it ever comes back.
+   A dedicated tunnel port (`17800` + `ABL_VOICE_TARGETS`) is documented as a no-code switch.
+3. **abl1 :7800 listens on 0.0.0.0** (`run_abl.sh`), so it's reachable from the LAN as well as the tailnet. ufw rules are in the scan report.
+4. Quiet hours are hard-coded in at least three places (the settings spec makes them one source of truth).
+5. The desktop speaker and the phone share `/api/abl/voice/pending`, which marks the *phone* as seen. A per-device outbox is needed before the desktop polls it.
+
+**Totals:** 163 tests passing from the repo root (`python3 -m pytest -q`); pyflakes clean.
+
+**New decisions for Asif:** `quiet.yellow_policy` hold vs send; quiet-hours breakthrough scope;
+whether `money` may be lowered to YELLOW; the 8 desktop autopilot system names; and the ears tunnel port (7800 as asked, or 17800 as recommended).

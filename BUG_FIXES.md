@@ -23,6 +23,7 @@ python3 -m pytest fixes/tests -q   # 27 passed
 
 **Symptom:** fleet registry (:8900) lists the desktop at `100.127.203.4`; it is now `100.117.30.114`.
 **Cause:** ❓ where the registry persists nodes (JSON / YAML / SQLite / memory) wasn't visible from the cloud.
+**Check first (added in the follow-up):** a desktop-side `abl-fleet-registry` may still be alive. Desktop `gamemode_watch` restarts it every 10 s if it's only `pm2 stop`ped, and it may be the thing re-publishing the old IP. See `reports/LOCALHOST_7800_SCAN.md` → "desktop gamemode can resurrect". Run `pm2 ls | grep fleet` on the desktop before editing abl1.
 
 ### Script
 ```bash
