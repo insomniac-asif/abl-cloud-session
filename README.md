@@ -20,5 +20,6 @@ bash deploy/deploy_abl1.sh            # on abl1: dry run
 bash deploy/deploy_abl1.sh --apply    # on abl1: install + in-tree tests
 ```
 
-Layout mirrors Odysseus: `src/`, `routes/`, `tests/` drop into `~/abl/odysseus/`;
-`tools/` and `fixes/` run from this checkout.
+Layout mirrors Odysseus: `src/autoresponder.py`, `routes/`, `tests/test_autoresponder.py` drop into
+`~/abl/odysseus/` (via `deploy/deploy_abl1.sh`). **`src/voice_bridge.py` goes to the desktop**
+(`~/ops/speaker/`, see `patches/EARS_PATCH.md`). `tools/`, `fixes/`, `patches/` run from this checkout.
