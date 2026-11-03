@@ -30,6 +30,13 @@ from src.autoresponder import Tier  # noqa: E402
 def _isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("ABL_AUTORESPONDER_DATA_DIR", str(tmp_path / "ar"))
     monkeypatch.setenv("ABL_ALERT_RULES_DISABLE", "1")
+    # Isolated settings store with quiet hours OFF, so timer tests never depend on the
+    # wall clock (quiet hours default to 23:00-09:00 ET with YELLOW hold).
+    sp = tmp_path / "settings.json"
+    sp.write_text(json.dumps({"version": 1, "values": {"quiet.enabled": False}}))
+    monkeypatch.setenv("ABL_SETTINGS_PATH", str(sp))
+    from src import abl_settings
+    abl_settings.reset_cache()
     for k in ("ABL_AUTORESPONDER_MODE", "ABL_AUTORESPONDER_AUTOSEND_CHANNELS", "ABL_AUTORESPONDER_TIERS",
               "ABL_AUTORESPONDER_CHAIN", "TYPESAFE_API_KEY", "DEEPSEEK_API_KEY", "ABL_JEV_CALLABLE",
               "ABL_AUTORESPONDER_CONTACTS", "ABL_AUTORESPONDER_HOLD_SECONDS", "ABL_ALERT_RULES_PATH"):
@@ -579,3 +586,65 @@ def test_routes_do_not_block_event_loop(tmp_path, monkeypatch):
             assert (await slow_req).json()["verdict"]["tier"] == "YELLOW"
             return ping_s
     assert asyncio.run(go()) < 0.3
+
+
+
+# ── Settings panel integration (settings.json > env > default) ───────────────
+
+def _settings_file(tmp_path, values):
+    from src import abl_settings
+    p = tmp_path / "settings.json"
+    p.write_text(json.dumps({"version": 2, "values": {"quiet.enabled": False, **values}}))
+    abl_settings.reset_cache()
+
+
+def test_settings_panel_overrides_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABL_AUTORESPONDER_MODE", "draft")
+    monkeypatch.setenv("ABL_AUTORESPONDER_TIERS", json.dumps({"bills": "GREEN"}))
+    _settings_file(tmp_path, {"autoresponder.mode": "live", "alerts.tiers.bills": "RED",
+                              "autoresponder.hold_seconds": 120, "autoresponder.autosend_channels": ["sms"]})
+    assert ar.get_mode() == "live"
+    assert ar.category_tiers()["bills"] is Tier.RED
+    assert ar.hold_seconds() == 120
+    assert ar.autosend_channels() == frozenset({"sms"})
+
+
+def test_env_used_when_panel_unset(monkeypatch):
+    monkeypatch.setenv("ABL_AUTORESPONDER_MODE", "draft")
+    assert ar.get_mode() == "draft"
+
+
+def test_floors_hold_against_env_and_hand_edited_settings(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABL_AUTORESPONDER_TIERS", json.dumps({"fraud": "GREEN", "money": "GREEN"}))
+    _settings_file(tmp_path, {"alerts.tiers.security": "GREEN"})
+    t = ar.category_tiers()
+    assert t["fraud"] is Tier.RED and t["security"] is Tier.RED and t["money"] is Tier.YELLOW
+
+
+def test_yellow_draft_created_in_quiet_hours_waits_for_morning(tmp_path, monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from src import abl_settings
+    p = tmp_path / "settings.json"
+    p.write_text(json.dumps({"version": 1, "values": {"quiet.enabled": True, "quiet.yellow_policy": "hold"}}))
+    abl_settings.reset_cache()
+    q = ar.PendingQueue(tmp_path / "pending.json")
+    three_am = datetime(2026, 11, 4, 3, 0, tzinfo=ZoneInfo("America/New_York")).timestamp()
+    it = q.add(channel="sms", recipient="x", draft="hi", verdict=ar.Verdict(tier=Tier.YELLOW), now=three_am)
+    nine_am = datetime(2026, 11, 4, 9, 0, tzinfo=ZoneInfo("America/New_York")).timestamp()
+    assert it["held_for_quiet_hours"] is True and it["due_at"] == nine_am + 60
+    assert q.tick(None, live=False, now=three_am + 120) == []          # not released at 3:02 am
+    assert q.tick(None, live=False, now=nine_am + 61)[0]["status"] == "would_send"
+
+
+def test_quiet_policy_send_keeps_normal_timer(tmp_path):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from src import abl_settings
+    p = tmp_path / "settings.json"
+    p.write_text(json.dumps({"version": 1, "values": {"quiet.enabled": True, "quiet.yellow_policy": "send"}}))
+    abl_settings.reset_cache()
+    q = ar.PendingQueue(tmp_path / "pending.json")
+    t = datetime(2026, 11, 4, 3, 0, tzinfo=ZoneInfo("America/New_York")).timestamp()
+    it = q.add(channel="sms", recipient="x", draft="hi", verdict=ar.Verdict(tier=Tier.YELLOW), now=t)
+    assert it["held_for_quiet_hours"] is False and it["due_at"] == t + 60
