@@ -70,7 +70,7 @@ def test_cap_holds_the_rest_for_next_run(env, monkeypatch):
     monkeypatch.setenv("ABL_RESEARCH_MAX_LINES", "1")
     a, b = Spy(), Spy()
     r1 = rb.run(NOON, deliver=a)
-    r2 = rb.run(NOON + timedelta(hours=2), deliver=b)
+    rb.run(NOON + timedelta(hours=2), deliver=b)
     assert len(a.lines) == 1 and r1["held_for_later"] == 2
     assert len(b.lines) == 1 and b.lines[0] != a.lines[0]
 
