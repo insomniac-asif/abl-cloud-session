@@ -70,13 +70,21 @@ def _actionable(items: list[dict]) -> list[dict]:
 
 
 def snake_finds() -> tuple[list[dict], str]:
-    """(actionable finds, source label). Prefers the live summary(); falls back to the file."""
+    """(actionable finds, source label). Prefers the live summary(); falls back to the file.
+    An explicit ABL_DATA_DIR always wins: summary() reads the harvester's own data dir,
+    which would silently ignore the override."""
+    if os.environ.get("ABL_DATA_DIR"):
+        return _finds_from_file()
     try:
         sys.path.insert(0, str(ODYSSEUS))
         import abl_research_harvest as harvest  # type: ignore
         return list(harvest.summary().get("actionable", [])), "summary()"
     except Exception as e:
         log.debug("abl_research_harvest import failed (%r); reading research_finds.json", e)
+    return _finds_from_file()
+
+
+def _finds_from_file() -> tuple[list[dict], str]:
     try:
         doc = json.loads((_data() / "research_finds.json").read_text("utf-8"))
         return _actionable(doc.get("items", []))[:40], "research_finds.json"
@@ -167,6 +175,16 @@ def save_state(st: dict) -> None:
     os.replace(tmp, p)
 
 
+def voice_dispatch_available() -> bool:
+    """Seam for tests: is Odysseus's voice_dispatch importable from this tree?"""
+    import importlib.util
+    sys.path.insert(0, str(ODYSSEUS))
+    try:
+        return importlib.util.find_spec("voice_dispatch") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def default_deliver(text: str) -> str:
     """Odysseus channel picker (phone/desktop say-queue → Discord outbox). Returns the channel."""
     sys.path.insert(0, str(ODYSSEUS))
@@ -196,9 +214,7 @@ def run(now: Optional[datetime] = None, *, dry_run: bool = False,
         result["would_speak"] = [c["text"] for c in chosen]
         return result
     if deliver is None:
-        import importlib.util
-        sys.path.insert(0, str(ODYSSEUS))
-        if importlib.util.find_spec("voice_dispatch") is not None:
+        if voice_dispatch_available():
             deliver = default_deliver
         else:
             log.warning("voice_dispatch unavailable; writing lines to research_bridge/latest.json for pull only")

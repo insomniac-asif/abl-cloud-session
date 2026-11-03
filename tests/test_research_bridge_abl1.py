@@ -118,8 +118,12 @@ def test_disabled_in_settings(env):
     assert rb.run(NOON, deliver=Spy())["status"] == "disabled"
 
 
-def test_without_voice_dispatch_writes_file_and_does_not_mark_seen(env):
-    r = rb.run(NOON)                                     # no voice_dispatch importable in this repo
+def test_without_voice_dispatch_writes_file_and_does_not_mark_seen(env, monkeypatch):
+    # Force "absent": in a full-suite run the REAL Odysseus voice_dispatch can be importable
+    # (another test adds that tree to sys.path), and calling it would write a real outbox.
+    monkeypatch.setattr(rb, "voice_dispatch_available", lambda: False)
+    monkeypatch.setattr(rb, "default_deliver", lambda t: (_ for _ in ()).throw(AssertionError("must not deliver")))
+    r = rb.run(NOON)
     assert all(s["channel"] == "file" and not s["delivered"] for s in r["spoken"])
     assert json.loads((env / "data" / "research_bridge" / "latest.json").read_text())["spoken"]
     assert rb.load_state()["seen"] == []
@@ -138,3 +142,14 @@ def test_voice_bridge_pull_lines(monkeypatch):
     assert b.pull_lines() == ["hello", "world"]
     monkeypatch.setattr(b, "_request", lambda *a, **k: (403, b"{}"))
     assert b.pull_lines() == []
+
+
+def test_explicit_data_dir_wins_over_importable_harvester(env, monkeypatch):
+    """Regression: with a real abl_research_harvest importable, ABL_DATA_DIR must still be honoured."""
+    import types
+    fake = types.SimpleNamespace(summary=lambda: {"actionable": [find("from-real-harvester")]})
+    monkeypatch.setitem(sys.modules, "abl_research_harvest", fake)
+    finds, src = rb.snake_finds()
+    assert src == "research_finds.json" and {f["key"] for f in finds} == {"fast-ggml", "tiny-rag"}
+    monkeypatch.delenv("ABL_DATA_DIR")
+    assert rb.snake_finds()[1] == "summary()"                  # no override → live summary() is used

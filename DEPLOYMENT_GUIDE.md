@@ -36,6 +36,17 @@ ls -la "$SNAP"
 **Verify:** the three `.tgz` files are non-empty.
 **Rollback for anything below:** restore from `$SNAP`, or use the per-step rollback.
 
+### 0b. Orientation docs (CLAUDE.md + PROJECT_CONTEXT.md)
+The existing `~/abl/CLAUDE.md` is the v0.1–v0.16 sprint log, written for the old WSL desktop. Keep it as history, don't overwrite it blindly:
+```bash
+cd ~/abl && mkdir -p docs
+git mv CLAUDE.md docs/CLAUDE_HISTORY_v0.16.md 2>/dev/null || mv CLAUDE.md docs/CLAUDE_HISTORY_v0.16.md
+cp ~/abl-cloud-session/abl1/CLAUDE.md ~/abl/CLAUDE.md
+[ -f PROJECT_CONTEXT.md ] && cp PROJECT_CONTEXT.md PROJECT_CONTEXT.md.bak-cloudcc-20261103
+cat ~/abl-cloud-session/abl1/PROJECT_CONTEXT.md >> ~/abl/PROJECT_CONTEXT.md     # append: it's a living log
+```
+**Verify:** a fresh `claude` session in `~/abl` starts with the abl1 orientation (§1 commands).
+
 ---
 
 ## Step 1: Desktop hygiene (do this FIRST)
@@ -130,6 +141,17 @@ nvidia-smi --query-gpu=memory.used --format=csv; free -h | head -2
 ```
 **Rollback:** `cp app.py.bak-cloudcc-20261103 app.py` and restart the backend.
 
+### 4b. Dashboard endpoint (`GET /api/abl/dashboard`)
+Add to `app.py` next to the autoresponder lines:
+```python
+from routes.dashboard_routes import setup_dashboard_routes
+app.include_router(setup_dashboard_routes())
+```
+Optionally point it at the router's decision log: add `Environment=ABL_ROUTER_LOG=%h/abl/odysseus/data/abl/<router log>.jsonl`
+to the backend unit, or leave it unset and the collector auto-discovers `*router*.jsonl` under `data/` and `logs/`.
+**Verify:** `curl -s -H "Authorization: Bearer $(cat ~/abl/odysseus/data/abl/dev.token)" http://127.0.0.1:7800/api/abl/dashboard | jq '.status, .collect_ms, (.services|length), .router.status'`
+→ a status, under ~2000 ms, 16 services, and the router `ok` (or `no-log` with a hint).
+
 ---
 
 ## Step 5: Settings panel plugin (`dsh-abl-settings-r1`)
@@ -154,6 +176,17 @@ cd ~/abl/odysseus && venv/bin/python -c "from src import abl_settings as s; prin
 ```
 Undo it in the UI (or set it back). **Rollback:** `dsh plugin --profile web remove dsh-abl-settings-r1`, restart dsh-web,
 and optionally `mv settings.json settings.json.off` (everything reverts to the defaults, which equal the old behaviour).
+
+### 5b. Console r2 (replaces r1 after you've checked it)
+```bash
+cp -r ~/abl-cloud-session/plugins/dsh-abl-console-r2 ~/abl/tools/dsh/app/local-plugins/
+cd ~/abl/tools/dsh/app && dsh plugin --profile web add ./local-plugins/dsh-abl-console-r2
+node --test local-plugins/dsh-abl-console-r2/tests/server.test.mjs
+systemctl --user restart abl-dsh-web
+```
+**Verify:** sidebar → **Console**. All 5 tabs show cards with an "updated Xs ago" stamp. Stop Ollama briefly: the Models
+card says "Service unreachable" with the reason, and recovers within 30 s. Then `dsh plugin --profile web remove dsh-abl-console-r1`.
+**Rollback:** remove r2; r1 is untouched until then.
 
 ---
 
@@ -232,17 +265,18 @@ If the desktop Odysseus could ever come back, use the dedicated tunnel port (178
 mkdir -p ~/.config/abl ~/.config/systemd/user
 cp ~/abl-cloud-session/deploy/systemd/abl1.env.example ~/.config/abl/abl1.env && chmod 600 ~/.config/abl/abl1.env
 ${EDITOR:-nano} ~/.config/abl/abl1.env          # mail source, home lat/lon, optional calendar/bills/contacts
-cp ~/abl-cloud-session/deploy/systemd/abl-{morning-briefing,finance-voice}.{service,timer} ~/.config/systemd/user/
+cp ~/abl-cloud-session/deploy/systemd/abl-{morning-briefing,finance-voice,research-bridge}.{service,timer} ~/.config/systemd/user/
 systemctl --user daemon-reload
 # dry runs first (no timer yet):
 cd ~/abl/odysseus && set -a && . ~/.config/abl/abl1.env && set +a
 venv/bin/python -m src.morning_briefing_abl1 --speech
 venv/bin/python -m src.finance_voice_abl1 --speech
-systemctl --user enable --now abl-morning-briefing.timer abl-finance-voice.timer
+venv/bin/python -m src.research_bridge_abl1 --dry-run        # what it WOULD speak; changes nothing
+systemctl --user enable --now abl-morning-briefing.timer abl-finance-voice.timer abl-research-bridge.timer
 ```
 **Verify:**
 ```bash
-systemctl --user list-timers | grep -E 'abl-(morning|finance)'
+systemctl --user list-timers | grep -E 'abl-(morning|finance|research)'
 systemctl --user start abl-morning-briefing.service && journalctl --user -u abl-morning-briefing -n 20 --no-pager
 jq '.status, .priority, .sections | map_values(.status)' ~/abl/odysseus/data/abl/briefing/latest.json
 jq '.status, .totals' ~/abl/odysseus/data/abl/finance/latest.json
@@ -250,7 +284,7 @@ jq '.status, .totals' ~/abl/odysseus/data/abl/finance/latest.json
 Every section should be `ok`, `empty`, or `unavailable` with a reason; `error` means read its message. The desktop speaker reads
 `speech[]` from `latest.json`. Until a `/machine/briefing` route exists (spec P1), the desktop can pull it with
 `ssh rescue@abl1 cat ~/abl/odysseus/data/abl/briefing/latest.json` from its own scheduler.
-**Rollback:** `systemctl --user disable --now abl-morning-briefing.timer abl-finance-voice.timer`.
+**Rollback:** `systemctl --user disable --now abl-morning-briefing.timer abl-finance-voice.timer abl-research-bridge.timer`.
 
 ---
 
