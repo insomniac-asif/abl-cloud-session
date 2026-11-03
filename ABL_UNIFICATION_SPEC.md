@@ -135,8 +135,10 @@ rather than invent a new scheme:
 
 - Tokens live in `~/.config/abl/token` (mode 0600) on the client. They're sent as
   `Authorization: Bearer …` to `https://abl.<tailnet>/machine/…`.
-- The hub validates the token against Odysseus (`/tokens`). The `_require_owner` checks on
-  `/api/abl/voice/*` ✅ get a token-scope branch identical to `codex_routes._scope_owner`.
+- The hub validates the token against Odysseus (`/tokens`). `_require_owner` on
+  `/api/abl/voice/*` ✅ **already accepts an Asif-owned bearer token** (corrected 2026-11-03).
+  So the speaker works today with an owner token. 💡 Narrowing it to `voice:*` scopes (like
+  `codex_routes._scope_owner`) is a hardening step, not a prerequisite.
 - Rotation: 90 days, plus revoke on device loss (`DELETE /tokens/{id}` ✅).
 
 ---
@@ -234,8 +236,12 @@ with chat. 💡 Recommended: transcribe on the desktop (faster-whisper is alread
 send **text** to a new `POST /api/abl/voice/heard_text`. It reuses `_ambient_decision`, plus the
 same mode gates and owner check. Audio never leaves the desktop, which is also the better privacy posture.
 
-**Failure behaviour:** if abl1 is unreachable, ears.py buffers up to 5 minutes of transcripts
-locally (bounded queue), plays a local "ABL offline" chime once, and retries with backoff. It never falls back to a hosted STT/LLM.
+**Failure behaviour (implemented in `src/voice_bridge.py`):** endpoints are tried in priority
+order (tailnet → SSH tunnel), with per-endpoint exponential backoff. If none is reachable, the
+bridge buffers at most 10 chunks and **drops anything older than 30 s**, because a late reply to old
+speech is worse than none. It fires one `offline`/`online` callback per transition (ears.py
+plays the chime). A response timeout after the audio was sent is never re-sent, to avoid
+double replies. It never falls back to a hosted STT/LLM.
 
 ---
 

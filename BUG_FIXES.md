@@ -23,6 +23,7 @@ python3 -m pytest fixes/tests -q   # 27 passed
 
 **Symptom:** fleet registry (:8900) lists the desktop at `100.127.203.4`; it is now `100.117.30.114`.
 **Cause:** ❓ where the registry persists nodes (JSON / YAML / SQLite / memory) wasn't visible from the cloud.
+**Check first (added in the follow-up):** a desktop-side `abl-fleet-registry` may still be alive. Desktop `gamemode_watch` restarts it every 10 s if it's only `pm2 stop`ped, and it may be the thing re-publishing the old IP. See `reports/LOCALHOST_7800_SCAN.md` → "desktop gamemode can resurrect". Run `pm2 ls | grep fleet` on the desktop before editing abl1.
 
 ### Script
 ```bash
@@ -233,7 +234,8 @@ _TOKEN_FILE = pathlib.Path(os.environ.get("ABL_TOKEN_FILE", "~/.config/abl/token
 HEADERS = {"Authorization": f"Bearer {_TOKEN_FILE.read_text().strip()}"} if _TOKEN_FILE.exists() else {}
 # requests.post(ABL_URL, files={"audio": ...}, headers=HEADERS, timeout=15)
 ```
-P1 target (spec §7): `https://abl.<tailnet>.ts.net/machine/voice/heard`. Note that `/api/abl/voice/heard` currently calls `_require_owner` ✅, so the token branch from spec §4.2 must land first. Until then, the interim call needs whatever owner auth ears.py used against the old local Odysseus.
+P1 target (spec §7): `https://abl.<tailnet>.ts.net/machine/voice/heard`. `/api/abl/voice/heard` calls `_require_owner` ✅, which **already accepts an Asif-owned bearer token** (corrected 2026-11-03; an earlier draft said a token branch was needed). Create one on abl1 (`POST /tokens`, owner session) and put it in `~/.config/abl/token` on the desktop.
+**Superseded by the full implementation:** `src/voice_bridge.py` (failover, health, backoff, buffer) + `patches/patch_ears.py` (see `patches/EARS_PATCH.md`).
 
 ---
 
