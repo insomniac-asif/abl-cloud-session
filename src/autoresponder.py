@@ -369,7 +369,8 @@ _ALERT_RULES_TABLE_NAMES = ("RULES", "ALERT_RULES", "CATEGORIES", "PATTERNS", "C
 _ALERT_RULES_FN_NAMES = ("classify", "match", "match_rules", "check", "categorize", "evaluate", "classify_alert")
 _KNOWN_CATEGORIES = frozenset(DEFAULT_CATEGORY_TIERS)
 
-_alert_rules_cache: dict[str, Any] = {"loaded": False, "module": None, "table": None, "fn": None, "error": None}
+_alert_rules_cache: dict[str, Any] = {"loaded": False, "module": None, "table": None, "fn": None, "error": None,
+                                      "file_loaded": False}
 _alert_rules_lock = threading.Lock()
 
 
@@ -391,24 +392,46 @@ def _load_alert_rules() -> None:
         if _env("ABL_ALERT_RULES_DISABLE") == "1":
             return
         mod = None
-        try:
-            mod = importlib.import_module("alert_rules")
-        except ImportError:
+        explicit = _env("ABL_ALERT_RULES_PATH")
+        # Precedence: an explicit ABL_ALERT_RULES_PATH always wins (fresh load from that
+        # file); otherwise an importable `alert_rules`; otherwise the search paths.
+        if not explicit:
+            try:
+                mod = importlib.import_module("alert_rules")
+            except ImportError:
+                mod = None
+            except Exception as e:
+                _alert_rules_cache["error"] = repr(e)
+                log.warning("alert_rules import failed: %r", e)
+        if mod is None:
             for p in _alert_rules_search_paths():
                 cand = p if p.suffix == ".py" else p / "alert_rules.py"
-                if cand.is_file():
+                if not cand.is_file():
+                    continue
+                try:
+                    spec = importlib.util.spec_from_file_location("alert_rules", cand)
+                    mod = importlib.util.module_from_spec(spec)
+                    # Register BEFORE exec: dataclasses (and pickling, typing.get_type_hints)
+                    # resolve the defining module through sys.modules; without this any
+                    # alert_rules.py using @dataclass fails to load.
+                    previous = sys.modules.get("alert_rules")
+                    sys.modules["alert_rules"] = mod
                     try:
-                        spec = importlib.util.spec_from_file_location("alert_rules", cand)
-                        mod = importlib.util.module_from_spec(spec)
                         spec.loader.exec_module(mod)  # type: ignore[union-attr]
-                        break
-                    except Exception as e:  # a broken rules file must not break triage
-                        _alert_rules_cache["error"] = f"{cand}: {e!r}"
-                        log.warning("alert_rules load failed from %s: %r", cand, e)
-                        mod = None
-        except Exception as e:
-            _alert_rules_cache["error"] = repr(e)
-            log.warning("alert_rules import failed: %r", e)
+                    except BaseException:
+                        if previous is not None:
+                            sys.modules["alert_rules"] = previous
+                        else:
+                            sys.modules.pop("alert_rules", None)
+                        raise
+                    _alert_rules_cache["file_loaded"] = True
+                    break
+                except Exception as e:  # a broken rules file must not break triage
+                    _alert_rules_cache["error"] = f"{cand}: {e!r}"
+                    log.warning("alert_rules load failed from %s: %r", cand, e)
+                    mod = None
+                    if explicit:
+                        break                              # don't silently fall back past an explicit path
         if mod is None:
             return
         _alert_rules_cache["module"] = getattr(mod, "__file__", "alert_rules")
@@ -444,7 +467,10 @@ def _load_alert_rules() -> None:
 def reset_alert_rules_cache() -> None:
     """Test hook / hot-reload: forget the loaded alert_rules module."""
     with _alert_rules_lock:
-        _alert_rules_cache.update({"loaded": False, "module": None, "table": None, "fn": None, "error": None})
+        if _alert_rules_cache.get("file_loaded"):
+            sys.modules.pop("alert_rules", None)       # forget a module WE loaded from a file
+        _alert_rules_cache.update({"loaded": False, "module": None, "table": None, "fn": None, "error": None,
+                                   "file_loaded": False})
 
 
 def _normalise_fn_result(res: Any) -> list[str]:

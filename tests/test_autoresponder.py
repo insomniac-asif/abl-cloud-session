@@ -648,3 +648,20 @@ def test_quiet_policy_send_keeps_normal_timer(tmp_path):
     t = datetime(2026, 11, 4, 3, 0, tzinfo=ZoneInfo("America/New_York")).timestamp()
     it = q.add(channel="sms", recipient="x", draft="hi", verdict=ar.Verdict(tier=Tier.YELLOW), now=t)
     assert it["held_for_quiet_hours"] is False and it["due_at"] == t + 60
+
+
+def test_alert_rules_file_with_dataclasses_loads(tmp_path, monkeypatch):
+    """Regression: the file loader must register the module before exec, or @dataclass fails."""
+    p = tmp_path / "alert_rules.py"
+    p.write_text("from dataclasses import dataclass\n@dataclass\nclass R:\n    cat: str\n"
+                 "RULES = {'parcels': ['royal mail']}\n")
+    monkeypatch.delenv("ABL_ALERT_RULES_DISABLE")
+    monkeypatch.setenv("ABL_ALERT_RULES_PATH", str(p))
+    monkeypatch.delitem(sys.modules, "alert_rules", raising=False)
+    ar.reset_alert_rules_cache()
+    try:
+        assert "parcels" in ar.jev_classify("Royal Mail: your parcel", "x", "sms", chain=[]).categories
+        assert ar.status()["alert_rules"]["error"] is None
+    finally:
+        sys.modules.pop("alert_rules", None)
+        ar.reset_alert_rules_cache()
