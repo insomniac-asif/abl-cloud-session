@@ -233,7 +233,8 @@ _TOKEN_FILE = pathlib.Path(os.environ.get("ABL_TOKEN_FILE", "~/.config/abl/token
 HEADERS = {"Authorization": f"Bearer {_TOKEN_FILE.read_text().strip()}"} if _TOKEN_FILE.exists() else {}
 # requests.post(ABL_URL, files={"audio": ...}, headers=HEADERS, timeout=15)
 ```
-P1 target (spec §7): `https://abl.<tailnet>.ts.net/machine/voice/heard`. Note that `/api/abl/voice/heard` currently calls `_require_owner` ✅, so the token branch from spec §4.2 must land first. Until then, the interim call needs whatever owner auth ears.py used against the old local Odysseus.
+P1 target (spec §7): `https://abl.<tailnet>.ts.net/machine/voice/heard`. `/api/abl/voice/heard` calls `_require_owner` ✅, which **already accepts an Asif-owned bearer token** (corrected 2026-11-03; an earlier draft said a token branch was needed). Create one on abl1 (`POST /tokens`, owner session) and put it in `~/.config/abl/token` on the desktop.
+**Superseded by the full implementation:** `src/voice_bridge.py` (failover, health, backoff, buffer) + `patches/ears_voice_target.patch`.
 
 ---
 
