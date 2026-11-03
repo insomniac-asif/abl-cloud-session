@@ -56,7 +56,7 @@ install_one() {  # src dst
   fi
 }
 # abl1-side Python modules + their tests (voice_bridge.py is DESKTOP-side: never installed here)
-ABL1_MODULES="autoresponder abl_settings alert_rules morning_briefing_abl1 finance_voice_abl1"
+ABL1_MODULES="autoresponder abl_settings alert_rules morning_briefing_abl1 finance_voice_abl1 research_bridge_abl1 abl_dashboard"
 for m in $ABL1_MODULES; do
   [[ -f "$REPO/src/$m.py" ]] || continue
   install_one "$REPO/src/$m.py" "$ODY/src/$m.py"

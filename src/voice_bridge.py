@@ -409,6 +409,27 @@ class VoiceBridge:
                     self._buffer.appendleft((ts, audio, name))
                 break
 
+    def pull_lines(self) -> list[str]:
+        """Desktop speaker side: fetch + clear lines abl1 queued for speaking
+        (GET /api/abl/voice/pending; research bridge, briefing, voice_dispatch).
+        NOTE: that route also marks the *phone* as seen (voice_dispatch heuristic); a
+        per-device outbox (?device=desktop) is the clean fix, see DSH_SETTINGS_PANEL_SPEC 4.6."""
+        for ep in self._candidates():
+            try:
+                code, body = self._request("GET", ep.base + "/api/abl/voice/pending",
+                                           timeout=self.health_timeout)
+            except (_ConnectPhaseError, _AmbiguousError) as e:
+                self._record(ep, False, str(e))
+                continue
+            if code == 200:
+                try:
+                    return [str(x) for x in (json.loads(body or b"{}").get("lines") or []) if str(x).strip()]
+                except ValueError:
+                    return []
+            if 400 <= code < 500:
+                return []                               # auth problem: same rule as send_audio
+        return []
+
     def buffered(self) -> int:
         with self._lock:
             return len(self._buffer)
