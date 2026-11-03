@@ -1,0 +1,92 @@
+# Cloud Session Receipt: 2026-11-03
+
+**Session:** ABL Unification Sprint + Autoresponder Build (cloud, Claude Code)
+**Branch:** `claude/affectionate-pascal-2r7tzq` · **Deploy target:** abl1 (`rescue@192.168.1.208`), via a local session
+**Copied to abl1 by the deploy script as:** `~/abl/CLOUD_SESSION_RECEIPT_20261103.md`
+
+## Access reality (read first)
+The original brief assumed SSH to abl1. The cloud container has no route to `192.168.1.0/24`
+or the tailnet, and no `ssh` binary. The desktop's Remote Control folders aren't offered to
+cloud sessions. So **nothing on abl1 or the desktop was read or changed in this session.**
+Everything was built against the newest code available: the private repos
+`insomniac-asif/abl` and `insomniac-asif/abl-fused` (snapshots from 2026-08-05, about three months behind abl1).
+Files newer than that (`model_router.py`, `alert_rules.py`, `AUTORESPONDER_SPEC.md`, the Codex
+manifest, the dsh plugins, the errands scanner, the market bridge) were **not visible**. Code that couples
+to them is written as tolerant adapters, with one place to adjust each.
+
+## What was built
+
+| Goal | Deliverable | Status |
+|---|---|---|
+| 1 | `ABL_UNIFICATION_SPEC.md`: one origin via `tailscale serve`, routing map, Tailscale-identity + scoped-token auth, 49-page plugin migration in waves, model roles, voice, single-writer data model, P0–P3 build order with exit tests and rollbacks | ✅ ready for review |
+| 2 | `src/autoresponder.py` (`jev_classify`, GREEN/YELLOW/RED, 60 s hold queue, Jev → DeepSeek → 27B → 3B chain, alert_rules adapter, shadow/draft/live modes) + `routes/autoresponder_routes.py` | ✅ ready to deploy (shadow) |
+| 3 | `tools/codex_manifest_audit.py` (verifies all 127 tasks against disk, ranks the TODO) + `CODEX_TASK_AUDIT.md` (context-based estimate plus run instructions) | ✅ tool ready; real numbers need one run on abl1 |
+| 4 | `fixes/` (fleet IP, errands path, one-project-context drop-in, unit crash diagnoser) + `BUG_FIXES.md` with exact changes, verification and rollback | ✅ ready (dry-run first) |
+| + | `BUG_FIXES.md` B5–B7: OllamaEmbedder root cause found (`embedding_base_url` → Mac satellite), 35B bind, ears.py reroute | ✅ |
+| + | `deploy/deploy_abl1.sh`: dry run by default; backup, install, in-tree tests, self-test, fix dry runs, audit, health | ✅ |
+
+### Autoresponder design guarantees (each pinned by tests)
+1. **Deterministic floor.** The rules (built-ins plus `alert_rules.py`) set a minimum tier. Models can escalate it, never lower it, so prompt injection can't downgrade fraud.
+2. **RED is terminal.** No model is called for RED; OTPs and scam links never leave the process.
+3. **Egress-gated.** DeepSeek only goes through `core/egress_gateway`. It fails closed if the gateway is missing, and applies a strict policy (personal/financial content never goes hosted, even in audit mode). Hosted models never see the sender's identity.
+4. **Writes pinned off.** Default mode is `shadow`. `live` sends only on allow-listed channels (the list is empty by default).
+5. **Drafts re-checked.** A draft containing money, codes or links is dropped and the message is held.
+6. **Hash-only JSONL audit** (same convention as the egress gateway). Drafts are scrubbed once resolved.
+7. **Non-blocking.** HTTP routes run model calls in the threadpool, so a slow 27B can't stall the backend.
+
+Category → tier defaults: fraud, security, money, bills → **RED**; people → **YELLOW**; food, parcels → **GREEN**. Override with `ABL_AUTORESPONDER_TIERS`.
+
+## What was tested
+
+| Suite | Result | Notes |
+|---|---|---|
+| `tests/test_autoresponder.py` | **54 passed** | includes the real `core/egress_gateway.py` from the `abl` snapshot |
+| same suite inside a copy of the real Odysseus tree (its conftest) | **54 passed** | run by `deploy_abl1.sh --apply` end-to-end |
+| `tools/tests` | **33 passed** | all manifest shapes; status normalisation; verdicts; scoring; local-only push |
+| `fixes/tests` | **27 passed** | token-exact IP edits; tokenize-only rewrite; drop-in path safety; 17 crash signatures |
+| **Total from repo root** | **114 passed** | `python3 -m pytest -q` |
+| `python -m src.autoresponder --self-test` | 10/10 | rules only, no network |
+| `deploy/deploy_abl1.sh` dry run + `--apply` against a fake HOME with a real Odysseus copy | passes | health checks WARN as expected (no services in the cloud) |
+| pyflakes over all Python; `bash -n` on the deploy script | clean | |
+
+Bugs caught by the tests during the build and fixed: "partially done" read as done; optional-port regexes never capturing the port; `/tmp` marker scan picking up unrelated deep paths for the drop-in; blocking model calls on the event loop.
+
+## What the local session should do on abl1 (in order)
+
+```bash
+git clone -b claude/affectionate-pascal-2r7tzq https://github.com/insomniac-asif/abl-cloud-session ~/abl-cloud-session
+cd ~/abl-cloud-session
+bash deploy/deploy_abl1.sh            # dry run: read the output
+bash deploy/deploy_abl1.sh --apply    # installs the autoresponder files + docs, runs in-tree tests
+```
+1. Wire the routes in `odysseus/app.py` (2 lines, printed at the end of the deploy), restart the backend, then `curl :7800/api/health` and `curl :7800/api/abl/autoresponder/status`.
+2. Apply the fixes one by one per `BUG_FIXES.md`: B6 (35B bind) and Bug 4 (market bridge) first.
+3. Run `tools/codex_manifest_audit.py --probe-ports` and paste the result into `CODEX_TASK_AUDIT.md` §4.
+4. Close-out checks from the brief: `curl :7800/api/health`, `systemctl --user status abl-dsh-web`, `curl :8085/health`, `nvidia-smi; free -h`, `git status` in `~/abl/odysseus` and `~/abl`.
+
+## Questions and decisions for Asif before deployment
+
+1. **Autoresponder tiers.** Are bills RED (alert only) or YELLOW (draft + timer)? People YELLOW, food/parcels GREEN: confirm. Also compare against `AUTORESPONDER_SPEC.md`, which wasn't readable from the cloud.
+2. **DeepSeek for personal messages.** The strict policy means most real messages from people will be triaged **locally** even when DeepSeek is configured. That is deliberate (personal content stays local). Do you want that, or to allow hosted triage in egress `audit` mode?
+3. **Which channel goes live first**, and what's the auto-reply signature? (Default suffix: "— (auto-reply from Asif's assistant)".)
+4. **Who sends?** The autoresponder needs a `sender_fn` per channel (SMS/Discord/email). None is wired yet, which is fine for shadow/draft mode.
+5. **Spec §12 decisions:** Tailscale-identity auto sign-in; desktop 35B as a `review` role vs. 127.0.0.1-only; STT on the desktop vs. abl1; owner of ideation/projects; the eight unlisted pages; red/green palette additions.
+6. **Coordination API.** `:7800/build` is a page in the Aug snapshot. Which endpoint should the manifest audit `--push` to?
+7. **`TYPESAFE_API_KEY`.** When it arrives, does model_router expose Jev under one of `jev_call / call_jev / jev_complete / jev_chat / jev`? If not, set `ABL_JEV_CALLABLE=module:function`.
+
+## Still pending / not done
+- Nothing was deployed to or verified on abl1 or the desktop (no access).
+- Routes are not yet wired into `app.py`; that's a deliberate manual step with a backend restart.
+- Real Codex manifest numbers (needs one run on abl1).
+- Market bridge root cause (diagnoser plus mitigation are ready; the cause needs its journal).
+- Spec phases P1–P3; the `dsh-abl-inbox-r1` plugin (Wave 2) isn't started.
+
+## Files
+```
+ABL_UNIFICATION_SPEC.md   BUG_FIXES.md   CODEX_TASK_AUDIT.md   RECEIPT.md   README.md
+src/autoresponder.py      routes/autoresponder_routes.py      routes/__init__.py (local tests only; not deployed)
+tests/test_autoresponder.py
+tools/codex_manifest_audit.py      tools/tests/test_codex_manifest_audit.py
+fixes/_common.py  fix_fleet_ip.py  fix_errands_path.py  fix_one_project_context.py  diagnose_unit.py  tests/test_fixes.py
+deploy/deploy_abl1.sh
+```

@@ -525,3 +525,35 @@ def test_real_gateway_is_consulted_and_local_alert_url_check(monkeypatch):
     assert isinstance(ok, bool) and why
     assert gw.is_local_endpoint("http://127.0.0.1:8899/inbox")
     assert not gw.is_local_endpoint("https://api.deepseek.com/chat/completions")
+
+
+def test_routes_do_not_block_event_loop(tmp_path, monkeypatch):
+    """A slow model must not stall other requests: classify runs in the threadpool."""
+    fastapi = pytest.importorskip("fastapi")
+    import asyncio
+    import httpx
+    from routes.autoresponder_routes import setup_autoresponder_routes
+
+    def slow(prompt):
+        time.sleep(0.6)
+        return jv("YELLOW", "Let me check!")
+    r = _responder(tmp_path, [("local", slow)])
+    app = fastapi.FastAPI()
+    app.include_router(setup_autoresponder_routes(r, start_ticker=False))
+
+    @app.get("/ping")
+    async def ping():
+        return {"ok": True}
+
+    async def go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            t0 = time.monotonic()          # before the slow request: a blocked loop shows up here
+            slow_req = asyncio.create_task(c.post("/api/abl/autoresponder/classify",
+                                                  json={"message": "free friday?", "sender": "x"}))
+            await asyncio.sleep(0.05)
+            assert (await c.get("/ping")).status_code == 200
+            ping_s = time.monotonic() - t0
+            assert (await slow_req).json()["verdict"]["tier"] == "YELLOW"
+            return ping_s
+    assert asyncio.run(go()) < 0.3

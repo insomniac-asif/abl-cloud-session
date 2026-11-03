@@ -27,6 +27,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from src import autoresponder as ar
 
@@ -62,7 +63,7 @@ def setup_autoresponder_routes(responder: Optional[ar.AutoResponder] = None, *,
 
     @router.get("/api/abl/autoresponder/status")
     async def ar_status():
-        st = ar.status()
+        st = await run_in_threadpool(ar.status)
         st["pending"] = len(get().queue.list("pending"))
         return JSONResponse(st)
 
@@ -71,7 +72,8 @@ def setup_autoresponder_routes(responder: Optional[ar.AutoResponder] = None, *,
         msg, sender, channel = _msg_args(await _body(request))
         if msg is None:
             return JSONResponse({"ok": False, "error": "message (string) required"}, status_code=400)
-        v = ar.jev_classify(msg, sender, channel, chain=get().chain)
+        # Model backends are blocking urllib calls (up to ~45 s on the 27B): never on the event loop.
+        v = await run_in_threadpool(ar.jev_classify, msg, sender, channel, chain=get().chain)
         return JSONResponse({"ok": True, "verdict": v.to_dict()})
 
     @router.post("/api/abl/autoresponder/ingest")
@@ -79,7 +81,7 @@ def setup_autoresponder_routes(responder: Optional[ar.AutoResponder] = None, *,
         msg, sender, channel = _msg_args(await _body(request))
         if msg is None:
             return JSONResponse({"ok": False, "error": "message (string) required"}, status_code=400)
-        return JSONResponse({"ok": True, **get().handle(msg, sender, channel)})
+        return JSONResponse({"ok": True, **(await run_in_threadpool(get().handle, msg, sender, channel))})
 
     @router.get("/api/abl/autoresponder/pending")
     async def ar_pending(request: Request):
