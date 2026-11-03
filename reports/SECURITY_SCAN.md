@@ -10,7 +10,7 @@ box. Run `tools/security_audit_abl1.sh` on abl1 **and** on the desktop WSL to co
 | # | Severity | Finding | Where | Status |
 |---|---|---|---|---|
 | H1 | **HIGH** | Unauthenticated ABL core dashboard on `0.0.0.0:8081`. **Live:** anyone on the LAN can read all agent chat (incl. Lis memory context) and inject operator messages onto the bus. **Latent:** the proposal approve-override is one wiring line from live. `DashboardAuth` exists but is never wired in | `src/abl/web/app.py`, `src/abl/orchestrator.py:814` | **tested patch: `patches/abl_h1_dashboard_auth.patch`** |
-| H2 | **HIGH** | `gpuctl` on `0.0.0.0:7900` embeds the owner control token in its **unauthenticated** `GET /` page, so any LAN host can read it and POST `/api/free` (stops abl-backend + crons) | `odysseus/gpuctl.py:92,121` | fix below |
+| H2 | **HIGH** | `gpuctl` on `0.0.0.0:7900` embeds the owner control token in its **unauthenticated** `GET /` page, so any LAN host can read it and POST `/api/free` (stops abl-backend + crons) | `odysseus/gpuctl.py:92,121` | **tested patch: `patches/abl_h2_gpuctl_token.patch`** |
 | H3 | **HIGH** (runtime, desktop) | Windows 35B llama-server on `0.0.0.0:8095`, an unauthenticated LLM endpoint on the LAN. Likely produced by the cookbook defaults (M2) | desktop launcher | DEPLOYMENT_GUIDE Step 1b |
 | M1 | MEDIUM | Mesh peer server binds `0.0.0.0` and **falls back to plaintext** when certs are missing ("running without TLS"); its handlers include memory store | `src/abl/peer/__main__.py:160-175` | fix below |
 | M2 | MEDIUM | Cookbook generates `vllm` / `sglang` / `llama-server` / `llama_cpp.server` launch commands with `--host 0.0.0.0` by default (no auth on those servers) | `odysseus/static/js/cookbook.js:403,435,530,534`, `cookbook-hwfit.js:1180,1190` | fix below |
@@ -119,6 +119,11 @@ any LAN client can just read from the page first. `/api/free` stops `abl-backend
 +    ThreadingHTTPServer((HOST, PORT), H).serve_forever()
 ```
 The page JS should read the token from `localStorage` when the placeholder is empty, and prompt for it once.
+
+**Ready-to-apply (tested):** `patches/abl_h2_gpuctl_token.patch` (2 files, +71/−5). It adds `page_token(client_ip)` (token only for
+`127.0.0.1` / `::1`), `ABL_GPUCTL_HOST` (default `127.0.0.1`), and the `localStorage` plus one-time-prompt fallback in the page.
+`odysseus/tests/test_gpuctl_h2_token.py` has 10 tests, which **all fail on the unpatched file**. Apply on the desktop (where gpuctl runs):
+`cd ~/abl && git am ~/abl-cloud-session/patches/abl_h2_gpuctl_token.patch && pm2 restart abl-gpuctl`.
 Check `price_verify` and `gallery` too: the comment says they share `abl_control_auth`, so the same leak pattern is likely there.
 **Verify:** from another LAN host, `curl -s http://<desktop>:7900/ | grep -c <first 6 chars of token>` → `0` (or connection refused).
 

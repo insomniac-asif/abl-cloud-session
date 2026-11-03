@@ -1,0 +1,133 @@
+From a1fd78b97ea27503a48817d3ae1542acc953593c Mon Sep 17 00:00:00 2001
+From: cloudcc <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 21:36:14 +0000
+Subject: [PATCH] H2: gpuctl binds loopback and only pre-fills the control
+ token for local browsers
+
+---
+ odysseus/gpuctl.py                     | 27 +++++++++++---
+ odysseus/tests/test_gpuctl_h2_token.py | 49 ++++++++++++++++++++++++++
+ 2 files changed, 71 insertions(+), 5 deletions(-)
+ create mode 100644 odysseus/tests/test_gpuctl_h2_token.py
+
+diff --git a/odysseus/gpuctl.py b/odysseus/gpuctl.py
+index 1b48934..4c880a6 100644
+--- a/odysseus/gpuctl.py
++++ b/odysseus/gpuctl.py
+@@ -4,7 +4,8 @@
+ Runs as its OWN lightweight pm2 process (stdlib only, no models, no heavy ABL
+ imports beyond gamemode) so it STAYS UP even when free_gpu() stops abl-backend.
+ Asif taps one button — from the desktop or his phone on the LAN — to strip ABL
+-off the GPU before gaming, and RESTORE it after. Binds 0.0.0.0:7900.
++off the GPU before gaming, and RESTORE it after. Binds ABL_GPUCTL_HOST (default
++127.0.0.1):7900; the control token is only pre-filled for local browsers (SECURITY_SCAN H2).
+ """
+ import json
+ import os
+@@ -22,6 +23,19 @@ except Exception:  # noqa: BLE001 — fail CLOSED: no helper -> POSTs are refuse
+     auth = None
+ 
+ PORT = int(os.environ.get("ABL_GPUCTL_PORT", "7900"))
++# SECURITY_SCAN H2: loopback by default; set the tailnet IP to use it from the phone. Never 0.0.0.0.
++HOST = os.environ.get("ABL_GPUCTL_HOST", "127.0.0.1")
++_LOCAL_CLIENTS = frozenset({"127.0.0.1", "::1", "::ffff:127.0.0.1"})
++
++
++def page_token(client_ip: str) -> str:
++    """The control token is pre-filled ONLY for a browser on this machine. A remote client
++    gets an empty placeholder and must type the token once (the page keeps it in
++    localStorage). Before H2, every client that could GET / received the token, which
++    made the POST gate meaningless."""
++    if auth is None or client_ip not in _LOCAL_CLIENTS:
++        return ""
++    return auth.token_for_page()
+ 
+ PAGE = """<!doctype html><html><head><meta charset=utf-8>
+ <meta name=viewport content="width=device-width,initial-scale=1">
+@@ -48,7 +62,10 @@ h1{margin:0;font-size:20px;letter-spacing:.02em;opacity:.92}
+ <div id=models></div>
+ <div id=sub>Frees your whole GPU for gaming — stops ABL's backend + every model job and evicts the model off the card. Tap again when you're done to bring ABL back. Works from your phone on the LAN.</div>
+ <script>
+-const CTRL="__CTRL_TOKEN__";
++let CTRL="__CTRL_TOKEN__";
++if(!CTRL){try{CTRL=localStorage.getItem("ablCtrl")||""}catch(e){}}
++if(!CTRL){CTRL=(prompt("ABL control token (see abl_control_auth on the desktop):")||"").trim();
++  try{if(CTRL)localStorage.setItem("ablCtrl",CTRL)}catch(e){}}
+ let busy=false;
+ function render(s){
+   const on=!!(s.active&&s.manual), free=!!s.gpu_free;
+@@ -89,7 +106,7 @@ class H(BaseHTTPRequestHandler):
+     def do_GET(self):
+         p = self.path.split("?", 1)[0]
+         if p in ("/", "/index.html"):
+-            token = auth.token_for_page() if auth else ""
++            token = page_token(self.client_address[0])
+             return self._send(200, PAGE.replace("__CTRL_TOKEN__", token), "text/html; charset=utf-8")
+         if p == "/api/status":
+             return self._send(200, json.dumps(gamemode.gpu_status()))
+@@ -117,5 +134,5 @@ class H(BaseHTTPRequestHandler):
+ 
+ 
+ if __name__ == "__main__":
+-    print("abl-gpuctl on 0.0.0.0:%d" % PORT, flush=True)
+-    ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
++    print("abl-gpuctl on %s:%d" % (HOST, PORT), flush=True)
++    ThreadingHTTPServer((HOST, PORT), H).serve_forever()
+diff --git a/odysseus/tests/test_gpuctl_h2_token.py b/odysseus/tests/test_gpuctl_h2_token.py
+new file mode 100644
+index 0000000..ca27b79
+--- /dev/null
++++ b/odysseus/tests/test_gpuctl_h2_token.py
+@@ -0,0 +1,49 @@
++"""SECURITY_SCAN H2: gpuctl must not hand its control token to remote clients, and must not bind 0.0.0.0."""
++import ast
++import importlib
++import sys
++import types
++from pathlib import Path
++
++import pytest
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++@pytest.fixture
++def gpuctl(monkeypatch):
++    monkeypatch.setitem(sys.modules, "gamemode", types.SimpleNamespace(gpu_status=lambda: {}, free_gpu=None, restore=None))
++    monkeypatch.setitem(sys.modules, "abl_control_auth",
++                        types.SimpleNamespace(token_for_page=lambda: "SECRET-TOKEN", check=lambda h: True))
++    monkeypatch.syspath_prepend(str(ROOT))
++    sys.modules.pop("gpuctl", None)
++    return importlib.import_module("gpuctl")
++
++
++@pytest.mark.parametrize("ip,expected", [
++    ("127.0.0.1", "SECRET-TOKEN"), ("::1", "SECRET-TOKEN"), ("::ffff:127.0.0.1", "SECRET-TOKEN"),
++    ("192.168.1.50", ""), ("100.117.30.114", ""), ("10.0.0.2", ""),
++])
++def test_token_only_for_local_browser(gpuctl, ip, expected):
++    assert gpuctl.page_token(ip) == expected
++
++
++def test_get_handler_uses_client_address(gpuctl):
++    src = (ROOT / "gpuctl.py").read_text()
++    assert "page_token(self.client_address[0])" in src
++    assert "auth.token_for_page() if auth else" not in src            # the unconditional leak is gone
++
++
++def test_no_literal_all_interfaces_bind():
++    tree = ast.parse((ROOT / "gpuctl.py").read_text())
++    for n in ast.walk(tree):
++        if isinstance(n, ast.Constant) and n.value == "0.0.0.0":
++            pytest.fail(f"literal 0.0.0.0 at gpuctl.py:{n.lineno}")
++
++
++def test_default_host_is_loopback(gpuctl, monkeypatch):
++    assert gpuctl.HOST == "127.0.0.1"
++
++
++def test_page_falls_back_to_localstorage_prompt(gpuctl):
++    assert 'localStorage.getItem("ablCtrl")' in gpuctl.PAGE and "prompt(" in gpuctl.PAGE
+-- 
+2.43.0
+

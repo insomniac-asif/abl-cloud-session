@@ -147,7 +147,7 @@ whether `money` may be lowered to YELLOW; the 8 desktop autopilot system names; 
 
 **Security, act today:**
 - **H1:** the ABL core dashboard (`0.0.0.0:8081`) is unauthenticated. Anyone on the LAN can read all agent chat and inject operator messages, and the approve-override (a 3/3 bypass) is one wiring line from live. **Fixed by a tested patch:** `patches/abl_h1_dashboard_auth.patch` (15 new tests that all fail on the unpatched code).
-- **H2:** `gpuctl` (`0.0.0.0:7900`) embeds its control token in an unauthenticated page.
+- **H2:** `gpuctl` (`0.0.0.0:7900`) embeds its control token in an unauthenticated page. **Fixed by a tested patch:** `patches/abl_h2_gpuctl_token.patch` (10 tests that all fail on the unpatched file).
 - **H3:** the Windows 35B is bound to `0.0.0.0`.
 
 Exact fixes for all three are in `reports/SECURITY_SCAN.md`. No real secrets were found in tracked files.
