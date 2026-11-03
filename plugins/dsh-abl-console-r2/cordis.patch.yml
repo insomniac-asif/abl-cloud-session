@@ -1,0 +1,9 @@
+# dsh-abl-console-r2: install beside r1, verify, then remove r1 (plugin revision convention).
+- insert:
+    - id: abl-console-r2
+      name: dsh-abl-console-r2
+      config:
+        dashboardUrl: http://127.0.0.1:7800/api/abl/dashboard
+        # Odysseus owner/dev token, read server-side only (never sent to the browser).
+        tokenFile: /home/rescue/abl/odysseus/data/abl/dev.token
+        timeoutMs: 6000

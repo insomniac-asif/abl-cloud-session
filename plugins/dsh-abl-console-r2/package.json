@@ -1,0 +1,15 @@
+{
+  "name": "dsh-abl-console-r2",
+  "version": "2.0.0",
+  "description": "ABL Console r2: one /api/abl/dashboard call, spinners, error states, 30 s auto-refresh, per-card freshness.",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "exports": { ".": "./index.mjs", "./client": "./client.js", "./package.json": "./package.json" },
+  "files": ["index.mjs", "client.js", "cordis.patch.yml"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": { "platform": "web", "inject": [] }
+  },
+  "scripts": { "test": "node --test tests/*.test.mjs" }
+}

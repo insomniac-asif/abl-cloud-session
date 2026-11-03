@@ -1,0 +1,12 @@
+[Unit]
+Description=ABL research bridge (abl1): speak new research finds + high-severity queue items
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/abl/odysseus
+EnvironmentFile=-%h/.config/abl/abl1.env
+ExecStart=%h/abl/odysseus/venv/bin/python -m src.research_bridge_abl1
+Nice=10
+MemoryMax=400M
+TimeoutStartSec=120

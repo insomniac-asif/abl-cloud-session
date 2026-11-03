@@ -55,14 +55,20 @@ install_one() {  # src dst
     echo "  would install $src -> $dst$([[ -f "$dst" ]] && echo ' (overwrite, with backup)')"
   fi
 }
-install_one "$REPO/src/autoresponder.py"            "$ODY/src/autoresponder.py"
+# abl1-side Python modules + their tests (voice_bridge.py is DESKTOP-side: never installed here)
+ABL1_MODULES="autoresponder abl_settings alert_rules morning_briefing_abl1 finance_voice_abl1 research_bridge_abl1 abl_dashboard"
+for m in $ABL1_MODULES; do
+  [[ -f "$REPO/src/$m.py" ]] || continue
+  install_one "$REPO/src/$m.py" "$ODY/src/$m.py"
+  [[ -f "$REPO/tests/test_$m.py" ]] && install_one "$REPO/tests/test_$m.py" "$ODY/tests/test_$m.py"
+done
 install_one "$REPO/routes/autoresponder_routes.py"  "$ODY/routes/autoresponder_routes.py"
-install_one "$REPO/tests/test_autoresponder.py"     "$ODY/tests/test_autoresponder.py"
 # NOTE: routes/__init__.py in this repo exists only for local test discovery; never copied.
 
 if [[ $APPLY == 1 ]]; then
   say "4. tests in place (Odysseus conftest, real egress gateway, real model_router import)"
-  ( cd "$ODY" && "$PY" -m pytest -q -p no:cacheprovider tests/test_autoresponder.py ) && ok "in-tree tests passed" \
+  INTREE=""; for m in $ABL1_MODULES; do [[ -f "$ODY/tests/test_$m.py" ]] && INTREE="$INTREE tests/test_$m.py"; done
+  ( cd "$ODY" && "$PY" -m pytest -q -p no:cacheprovider $INTREE ) && ok "in-tree tests passed" \
     || die "in-tree tests failed; restore with: for f in src/autoresponder.py routes/autoresponder_routes.py tests/test_autoresponder.py; do ...; done"
   ( cd "$ODY" && "$PY" -m src.autoresponder --self-test ) && ok "autoresponder self-test" || die "self-test failed"
   ( cd "$ODY" && "$PY" -m src.autoresponder --status ) || warn "status failed"
@@ -88,8 +94,8 @@ fi
 
 if [[ $APPLY == 1 ]]; then
   say "7. docs into ~/abl"
-  for d in ABL_UNIFICATION_SPEC.md BUG_FIXES.md CODEX_TASK_AUDIT.md RECEIPT.md; do
-    install_one "$REPO/$d" "$HOME/abl/$d"
+  for d in ABL_UNIFICATION_SPEC.md BUG_FIXES.md CODEX_TASK_AUDIT.md RECEIPT.md DEPLOYMENT_GUIDE.md; do
+    [[ -f "$REPO/$d" ]] && install_one "$REPO/$d" "$HOME/abl/$d"
   done
   install_one "$REPO/RECEIPT.md" "$HOME/abl/CLOUD_SESSION_RECEIPT_20261103.md"
 fi

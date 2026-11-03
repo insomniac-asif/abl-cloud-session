@@ -1,0 +1,10 @@
+[Unit]
+Description=ABL research bridge every 2 hours (at :17)
+
+[Timer]
+OnCalendar=*-*-* 00/2:17:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

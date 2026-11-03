@@ -1,0 +1,16 @@
+# dsh-abl-settings-r1 bundle layer. Applied when the profile lists this bundle in
+# dsh.profile.bundles (`dsh plugin --profile web add ./local-plugins/dsh-abl-settings-r1`).
+# Override any config key in the profile's own cordis.patch.yml by restating the row
+# (patches replace a row's whole `config`, they do not deep-merge).
+- insert:
+    - id: abl-settings
+      name: dsh-abl-settings-r1
+      config:
+        # Single writer of ABL settings. Odysseus + desktop read this file.
+        settingsPath: /home/rescue/abl/odysseus/data/abl/settings.json
+        # Desktop screen-off systems (5 known; add the other three by name).
+        autopilotSystems: [autopilot, morning_briefing, research_bridge, finance_voice, chimes]
+        channels: [sms, imessage, whatsapp, discord, email]
+        modelOptions: ['llama-27b@127.0.0.1:8085']
+        lightOptions: ['qwen2.5:3b@127.0.0.1:11434']
+        voices: []

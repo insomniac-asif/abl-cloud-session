@@ -1,0 +1,312 @@
+From d4ae6d8985675253c449d65783f596cc7bd09314 Mon Sep 17 00:00:00 2001
+From: cloudcc <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 21:34:50 +0000
+Subject: [PATCH] H1: authenticate the ABL dashboard and bind loopback
+
+---
+ src/abl/orchestrator.py              |  14 +++-
+ src/abl/web/app.py                   |  72 +++++++++++++++-
+ tests/test_v016_h1_dashboard_auth.py | 119 +++++++++++++++++++++++++++
+ 3 files changed, 200 insertions(+), 5 deletions(-)
+ create mode 100644 tests/test_v016_h1_dashboard_auth.py
+
+diff --git a/src/abl/orchestrator.py b/src/abl/orchestrator.py
+index 9d7859e..166cb16 100644
+--- a/src/abl/orchestrator.py
++++ b/src/abl/orchestrator.py
+@@ -4,6 +4,8 @@ from __future__ import annotations
+ 
+ import asyncio
+ import logging
++import os
++from pathlib import Path
+ 
+ import chromadb
+ 
+@@ -435,11 +437,16 @@ class ABLOrchestrator:
+         self._health_task = asyncio.create_task(self._health_check_loop())
+ 
+         # 11. Web server
++        from abl.web.auth import DashboardAuth  # SECURITY_SCAN H1: never serve the dashboard unauthenticated
++
++        self._dashboard_auth = DashboardAuth(
++            _token_path=str(Path(os.environ.get("ABL_DASHBOARD_TOKEN_PATH", "~/.abl/dashboard_token")).expanduser()))
+         self._web_app = create_app(
+             bus=self._bus,
+             hmac_secret=secret,
+             vitals=self._vitals,
+             governor=self._governor,
++            auth=self._dashboard_auth,
+         )
+         self._web_task = asyncio.create_task(self._run_web_server())
+ 
+@@ -790,11 +797,14 @@ class ABLOrchestrator:
+         import uvicorn
+ 
+         port = self._config.system.web_port
++        # Loopback by default (SECURITY_SCAN H1). Set ABL_WEB_HOST to the tailnet IP to reach it
++        # from the phone; never 0.0.0.0 on a LAN.
++        web_host = os.environ.get("ABL_WEB_HOST", "127.0.0.1")
+ 
+         probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+         try:
+-            probe.bind(("0.0.0.0", port))
++            probe.bind((web_host, port))
+         except OSError as e:
+             if e.errno == 98:
+                 logger.warning(
+@@ -811,7 +821,7 @@ class ABLOrchestrator:
+ 
+         config = uvicorn.Config(
+             self._web_app,
+-            host="0.0.0.0",
++            host=web_host,
+             port=port,
+             log_level="warning",
+         )
+diff --git a/src/abl/web/app.py b/src/abl/web/app.py
+index 655fbb7..6afdcf6 100644
+--- a/src/abl/web/app.py
++++ b/src/abl/web/app.py
+@@ -13,7 +13,7 @@ from typing import Any
+ from uuid import UUID
+ 
+ import psutil
+-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
++from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+ from fastapi.responses import FileResponse, JSONResponse
+ from fastapi.staticfiles import StaticFiles
+ from pydantic import BaseModel
+@@ -100,6 +100,7 @@ def create_app(
+     consensus_manager: Any | None = None,
+     governor: Any | None = None,
+     lis: Any | None = None,
++    auth: Any | None = None,
+ ) -> FastAPI:
+     """Create the FastAPI app wired to the given bus.
+ 
+@@ -109,6 +110,12 @@ def create_app(
+         vitals: Optional VitalsMonitor for agent status.
+         consensus_manager: Optional ConsensusManager for proposal management.
+         governor: Optional ResourceGovernor for KAIROS state.
++        auth: Optional ``DashboardAuth``. When given, EVERY route except
++            ``GET /system/health``, ``GET /login`` and ``POST /auth/login``
++            requires a valid session cookie or ``Authorization: Bearer <token>``,
++            and the chat websocket is refused before ``accept()``. Production
++            (orchestrator step 11) always passes one (SECURITY_SCAN H1); ``None``
++            keeps the legacy open behaviour for unit tests only.
+     """
+     _ws_clients: set[WebSocket] = set()
+     _recent_messages: deque[dict[str, Any]] = deque(maxlen=200)
+@@ -157,6 +164,62 @@ def create_app(
+ 
+     app = FastAPI(title="ABL Group Chat", version="0.2.0", lifespan=lifespan)
+ 
++    # --- Auth (SECURITY_SCAN H1): owner token / session cookie on every route ---
++    _PUBLIC = {("GET", "/system/health"), ("GET", "/login"), ("POST", "/auth/login")}
++    _COOKIE = "abl_dash_session"
++
++    def _authed(headers: Any, cookies: Any) -> bool:
++        if auth is None:
++            return True
++        bearer = (headers.get("authorization") or "").removeprefix("Bearer ").strip()
++        if bearer and auth.validate_token(bearer):
++            return True
++        sid = cookies.get(_COOKIE, "")
++        return bool(sid) and bool(auth.validate_session(sid))
++
++    if auth is not None:
++        # Request is imported at module level: with `from __future__ import annotations`
++        # a locally-imported annotation can't be resolved and FastAPI would 422 the login.
++        from fastapi.responses import HTMLResponse as _LoginHTML, RedirectResponse
++
++        @app.middleware("http")
++        async def _require_owner(request: Request, call_next):
++            if (request.method, request.url.path) in _PUBLIC or _authed(request.headers, request.cookies):
++                return await call_next(request)
++            if request.method == "GET" and "text/html" in (request.headers.get("accept") or ""):
++                return RedirectResponse("/login", status_code=303)
++            return JSONResponse({"detail": "dashboard token required"}, status_code=401)
++
++        @app.get("/login")
++        async def login_page():
++            return _LoginHTML(
++                "<!doctype html><meta name=viewport content='width=device-width'>"
++                "<title>ABL login</title><body style='background:#161b30;color:#fff;font:16px system-ui;padding:24px'>"
++                "<form method=post action=/auth/login><p>Dashboard token (~/.abl/dashboard_token)</p>"
++                "<input name=token type=password autofocus style='width:100%;max-width:420px;padding:8px'>"
++                "<button style='margin-top:12px;padding:8px 16px;background:#cbbbff;border:0'>Sign in</button></form>")
++
++        @app.post("/auth/login")
++        async def login(request: Request):
++            token = ""
++            if "application/json" in (request.headers.get("content-type") or ""):
++                try:
++                    token = str((await request.json()).get("token", ""))
++                except Exception:
++                    token = ""
++            else:
++                form = (await request.body()).decode("utf-8", "replace")
++                from urllib.parse import parse_qs
++                token = (parse_qs(form).get("token") or [""])[0]
++            sid = auth.validate_token(token.strip()) if token else None
++            if not sid:
++                return JSONResponse({"detail": "invalid token"}, status_code=401)
++            resp = RedirectResponse("/", status_code=303)
++            resp.set_cookie(_COOKIE, sid, httponly=True, samesite="strict", path="/")
++            return resp
++    else:
++        logger.warning("create_app(auth=None): dashboard routes are UNAUTHENTICATED (tests only)")
++
+     # --- Static files ---
+     if _STATIC_DIR.is_dir():
+         app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+@@ -220,14 +283,17 @@ def create_app(
+         adapter = AgentBusAdapter(bus, AgentID.HUMAN, hmac_secret)
+         payload = UserInputPayload(
+             text=msg.content,
+-            user_id=getattr(msg, "user_id", "asif"),
+-            user_role=getattr(msg, "user_role", "operator"),
++            user_id="asif",            # authenticated owner; never taken from the request body
++            user_role="operator",
+         )
+         envelope = await adapter.broadcast(payload)
+         return {"status": "sent", "message_id": str(envelope.id)}
+ 
+     @app.websocket("/chat/stream")
+     async def chat_stream(websocket: WebSocket) -> None:
++        if not _authed(websocket.headers, websocket.cookies):
++            await websocket.close(code=4401)          # never accept an unauthenticated stream
++            return
+         await websocket.accept()
+         _ws_clients.add(websocket)
+         try:
+diff --git a/tests/test_v016_h1_dashboard_auth.py b/tests/test_v016_h1_dashboard_auth.py
+new file mode 100644
+index 0000000..83bc52b
+--- /dev/null
++++ b/tests/test_v016_h1_dashboard_auth.py
+@@ -0,0 +1,119 @@
++"""SECURITY_SCAN H1 — the dashboard must never serve agent chat or accept operator input
++unauthenticated, and production must always wire DashboardAuth + a loopback bind.
++
++Behaviour tests use create_app(..., auth=DashboardAuth(_token_override=...)).
++Wiring tests are AST invariants on orchestrator.py (PATTERNS #68: AST, not substrings),
++so deleting the auth= kwarg or reintroducing a literal "0.0.0.0" bind fails on the diff.
++"""
++from __future__ import annotations
++
++import ast
++import inspect
++import textwrap
++from unittest.mock import MagicMock
++
++import pytest
++from fastapi.testclient import TestClient
++
++from abl.web.app import create_app
++from abl.web.auth import DashboardAuth
++
++TOKEN = "t" * 32
++
++
++def _app(**kw):
++    bus = MagicMock()
++    bus.subscribe = MagicMock(side_effect=lambda *a, **k: _EmptySub())
++    return create_app(bus, hmac_secret="test-secret", auth=DashboardAuth(_token_override=TOKEN), **kw)
++
++
++class _EmptySub:
++    def __aiter__(self):
++        return self
++
++    async def __anext__(self):
++        raise StopAsyncIteration
++
++    def close(self):
++        pass
++
++
++@pytest.fixture
++def client():
++    with TestClient(_app()) as c:
++        yield c
++
++
++@pytest.mark.parametrize("method,path", [
++    ("GET", "/chat/history"), ("POST", "/chat/send"), ("GET", "/proposals"),
++    ("POST", "/proposals/00000000-0000-0000-0000-000000000000/approve"),
++    ("POST", "/proposals/00000000-0000-0000-0000-000000000000/reject"), ("GET", "/agents/status"),
++])
++def test_unauthenticated_requests_are_refused(client, method, path):
++    r = client.request(method, path, json={"content": "hi"})
++    assert r.status_code == 401
++
++
++def test_browser_gets_redirected_to_login(client):
++    r = client.get("/", headers={"accept": "text/html"}, follow_redirects=False)
++    assert r.status_code == 303 and r.headers["location"] == "/login"
++    assert "Dashboard token" in client.get("/login").text
++
++
++def test_health_stays_public(client):
++    assert client.get("/system/health").status_code != 401
++
++
++def test_wrong_token_rejected(client):
++    assert client.post("/auth/login", json={"token": "nope"}).status_code == 401
++    assert client.get("/chat/history", headers={"authorization": "Bearer nope"}).status_code == 401
++
++
++def test_login_sets_strict_httponly_cookie_and_unlocks(client):
++    r = client.post("/auth/login", data={"token": TOKEN}, follow_redirects=False)
++    assert r.status_code == 303
++    cookie = r.headers["set-cookie"].lower()
++    assert "abl_dash_session=" in cookie and "httponly" in cookie and "samesite=strict" in cookie
++    assert client.get("/chat/history").status_code == 200
++
++
++def test_bearer_token_for_scripts(client):
++    assert client.get("/chat/history", headers={"authorization": f"Bearer {TOKEN}"}).status_code == 200
++
++
++def test_websocket_refused_without_auth(client):
++    from starlette.websockets import WebSocketDisconnect
++    with pytest.raises(WebSocketDisconnect) as e:
++        with client.websocket_connect("/chat/stream") as ws:
++            ws.receive_json()
++    assert e.value.code == 4401
++
++
++def test_chat_send_pins_operator_role_server_side():
++    src = inspect.getsource(create_app)
++    tree = ast.parse(textwrap.dedent(src))
++    send = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "send_message")
++    kws = {k.arg: k.value for n in ast.walk(send) if isinstance(n, ast.Call) for k in n.keywords}
++    assert isinstance(kws["user_role"], ast.Constant) and kws["user_role"].value == "operator"
++    assert isinstance(kws["user_id"], ast.Constant)        # never getattr(msg, ...) from the request body
++
++
++def _orchestrator_tree():
++    # Parse, don't import: importing pulls chromadb and the whole runtime.
++    from pathlib import Path
++    import abl
++    return ast.parse((Path(abl.__file__).parent / "orchestrator.py").read_text(encoding="utf-8"))
++
++
++def test_orchestrator_always_passes_auth_to_create_app():
++    calls = [n for n in ast.walk(_orchestrator_tree())
++             if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == "create_app"]
++    assert calls, "orchestrator no longer calls create_app?"
++    for c in calls:
++        assert any(k.arg == "auth" for k in c.keywords), "create_app called without auth= (H1 regression)"
++
++
++def test_orchestrator_never_binds_literal_all_interfaces():
++    for n in ast.walk(_orchestrator_tree()):
++        if isinstance(n, ast.Constant) and n.value == "0.0.0.0":
++            pytest.fail(f'literal "0.0.0.0" at orchestrator.py:{n.lineno} (bind via ABL_WEB_HOST, default 127.0.0.1)')
+-- 
+2.43.0
+

@@ -155,12 +155,36 @@ def _env(name: str, default: str = "") -> str:
     return (os.environ.get(name) or default).strip()
 
 
+def _settings():
+    """The dsh-abl-settings-r1 store reader, or None (module absent → env/defaults only)."""
+    try:
+        from src import abl_settings  # type: ignore
+        return abl_settings
+    except ImportError:
+        try:
+            import abl_settings  # type: ignore
+            return abl_settings
+        except ImportError:
+            return None
+
+
+def _from_settings(key: str):
+    st = _settings()
+    if st is not None and st.is_set(key):
+        return st.get(key)
+    return None
+
+
 def get_mode() -> str:
-    m = _env("ABL_AUTORESPONDER_MODE", "shadow").lower()
+    """Precedence: settings.json (Settings panel) > ABL_AUTORESPONDER_MODE > shadow."""
+    m = (_from_settings("autoresponder.mode") or _env("ABL_AUTORESPONDER_MODE", "shadow")).lower()
     return m if m in MODES else "shadow"
 
 
 def hold_seconds() -> int:
+    v = _from_settings("autoresponder.hold_seconds")
+    if isinstance(v, int) and v >= 5:
+        return v
     try:
         return max(5, int(_env("ABL_AUTORESPONDER_HOLD_SECONDS", str(DEFAULT_HOLD_SECONDS))))
     except ValueError:
@@ -168,6 +192,9 @@ def hold_seconds() -> int:
 
 
 def autosend_channels() -> frozenset[str]:
+    v = _from_settings("autoresponder.autosend_channels")
+    if isinstance(v, list):
+        return frozenset(str(c).strip().lower() for c in v if str(c).strip())
     raw = _env("ABL_AUTORESPONDER_AUTOSEND_CHANNELS")
     return frozenset(c.strip().lower() for c in raw.split(",") if c.strip())
 
@@ -183,6 +210,17 @@ def category_tiers() -> dict[str, Tier]:
                     tiers[str(k).lower()] = t
         except (ValueError, AttributeError) as e:
             log.warning("ABL_AUTORESPONDER_TIERS ignored (bad JSON): %s", e)
+    st = _settings()                                   # Settings panel wins over env
+    if st is not None:
+        for cat in list(tiers):
+            if st.is_set(f"alerts.tiers.{cat}"):
+                t = Tier.parse(st.get(f"alerts.tiers.{cat}"))
+                if t is not None:
+                    tiers[cat] = t
+    # Safety floors, re-applied here so neither env nor a hand-edited settings.json can weaken them.
+    tiers["fraud"] = Tier.RED
+    tiers["security"] = Tier.RED
+    tiers["money"] = max_tier(tiers.get("money"), Tier.YELLOW)
     return tiers
 
 
@@ -331,7 +369,8 @@ _ALERT_RULES_TABLE_NAMES = ("RULES", "ALERT_RULES", "CATEGORIES", "PATTERNS", "C
 _ALERT_RULES_FN_NAMES = ("classify", "match", "match_rules", "check", "categorize", "evaluate", "classify_alert")
 _KNOWN_CATEGORIES = frozenset(DEFAULT_CATEGORY_TIERS)
 
-_alert_rules_cache: dict[str, Any] = {"loaded": False, "module": None, "table": None, "fn": None, "error": None}
+_alert_rules_cache: dict[str, Any] = {"loaded": False, "module": None, "table": None, "fn": None, "error": None,
+                                      "file_loaded": False}
 _alert_rules_lock = threading.Lock()
 
 
@@ -353,24 +392,46 @@ def _load_alert_rules() -> None:
         if _env("ABL_ALERT_RULES_DISABLE") == "1":
             return
         mod = None
-        try:
-            mod = importlib.import_module("alert_rules")
-        except ImportError:
+        explicit = _env("ABL_ALERT_RULES_PATH")
+        # Precedence: an explicit ABL_ALERT_RULES_PATH always wins (fresh load from that
+        # file); otherwise an importable `alert_rules`; otherwise the search paths.
+        if not explicit:
+            try:
+                mod = importlib.import_module("alert_rules")
+            except ImportError:
+                mod = None
+            except Exception as e:
+                _alert_rules_cache["error"] = repr(e)
+                log.warning("alert_rules import failed: %r", e)
+        if mod is None:
             for p in _alert_rules_search_paths():
                 cand = p if p.suffix == ".py" else p / "alert_rules.py"
-                if cand.is_file():
+                if not cand.is_file():
+                    continue
+                try:
+                    spec = importlib.util.spec_from_file_location("alert_rules", cand)
+                    mod = importlib.util.module_from_spec(spec)
+                    # Register BEFORE exec: dataclasses (and pickling, typing.get_type_hints)
+                    # resolve the defining module through sys.modules; without this any
+                    # alert_rules.py using @dataclass fails to load.
+                    previous = sys.modules.get("alert_rules")
+                    sys.modules["alert_rules"] = mod
                     try:
-                        spec = importlib.util.spec_from_file_location("alert_rules", cand)
-                        mod = importlib.util.module_from_spec(spec)
                         spec.loader.exec_module(mod)  # type: ignore[union-attr]
-                        break
-                    except Exception as e:  # a broken rules file must not break triage
-                        _alert_rules_cache["error"] = f"{cand}: {e!r}"
-                        log.warning("alert_rules load failed from %s: %r", cand, e)
-                        mod = None
-        except Exception as e:
-            _alert_rules_cache["error"] = repr(e)
-            log.warning("alert_rules import failed: %r", e)
+                    except BaseException:
+                        if previous is not None:
+                            sys.modules["alert_rules"] = previous
+                        else:
+                            sys.modules.pop("alert_rules", None)
+                        raise
+                    _alert_rules_cache["file_loaded"] = True
+                    break
+                except Exception as e:  # a broken rules file must not break triage
+                    _alert_rules_cache["error"] = f"{cand}: {e!r}"
+                    log.warning("alert_rules load failed from %s: %r", cand, e)
+                    mod = None
+                    if explicit:
+                        break                              # don't silently fall back past an explicit path
         if mod is None:
             return
         _alert_rules_cache["module"] = getattr(mod, "__file__", "alert_rules")
@@ -406,7 +467,10 @@ def _load_alert_rules() -> None:
 def reset_alert_rules_cache() -> None:
     """Test hook / hot-reload: forget the loaded alert_rules module."""
     with _alert_rules_lock:
-        _alert_rules_cache.update({"loaded": False, "module": None, "table": None, "fn": None, "error": None})
+        if _alert_rules_cache.get("file_loaded"):
+            sys.modules.pop("alert_rules", None)       # forget a module WE loaded from a file
+        _alert_rules_cache.update({"loaded": False, "module": None, "table": None, "fn": None, "error": None,
+                                   "file_loaded": False})
 
 
 def _normalise_fn_result(res: Any) -> list[str]:
@@ -887,10 +951,21 @@ class PendingQueue:
     def add(self, *, channel: str, recipient: str, draft: str, verdict: Verdict,
             delay_s: Optional[int] = None, now: Optional[float] = None) -> dict[str, Any]:
         now = time.time() if now is None else now
+        hold = hold_seconds() if delay_s is None else delay_s
+        due = now + hold
+        held_for_quiet = False
+        st = _settings()
+        if st is not None and delay_s is None and st.get("quiet.yellow_policy") == "hold":
+            from datetime import datetime as _dt, timezone as _tz
+            end = st.quiet_end_after(_dt.fromtimestamp(now, _tz.utc))
+            if end is not None:                        # nobody reviews at 3 am: wait for morning
+                due = max(due, end.timestamp() + hold)
+                held_for_quiet = True
         item = {
             "id": uuid.uuid4().hex[:12],
             "created": now,
-            "due_at": now + (hold_seconds() if delay_s is None else delay_s),
+            "held_for_quiet_hours": held_for_quiet,
+            "due_at": due,
             "channel": channel,
             "recipient": recipient,
             "draft": draft,

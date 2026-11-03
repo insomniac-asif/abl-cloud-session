@@ -1,0 +1,10 @@
+[Unit]
+Description=ABL morning briefing at 07:25 local
+
+[Timer]
+OnCalendar=*-*-* 07:25:00
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
