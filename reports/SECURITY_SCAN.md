@@ -9,7 +9,7 @@ box. Run `tools/security_audit_abl1.sh` on abl1 **and** on the desktop WSL to co
 
 | # | Severity | Finding | Where | Status |
 |---|---|---|---|---|
-| H1 | **HIGH** | Unauthenticated ABL core dashboard on `0.0.0.0:8081`: anyone on the LAN can list **and approve** agent proposals ("HUMAN OVERRIDE") and inject chat as the operator. `DashboardAuth` exists but is never wired in | `src/abl/web/app.py`, `src/abl/orchestrator.py:814` | fix below |
+| H1 | **HIGH** | Unauthenticated ABL core dashboard on `0.0.0.0:8081`. **Live:** anyone on the LAN can read all agent chat (incl. Lis memory context) and inject operator messages onto the bus. **Latent:** the proposal approve-override is one wiring line from live. `DashboardAuth` exists but is never wired in | `src/abl/web/app.py`, `src/abl/orchestrator.py:814` | **tested patch: `patches/abl_h1_dashboard_auth.patch`** |
 | H2 | **HIGH** | `gpuctl` on `0.0.0.0:7900` embeds the owner control token in its **unauthenticated** `GET /` page, so any LAN host can read it and POST `/api/free` (stops abl-backend + crons) | `odysseus/gpuctl.py:92,121` | fix below |
 | H3 | **HIGH** (runtime, desktop) | Windows 35B llama-server on `0.0.0.0:8095`, an unauthenticated LLM endpoint on the LAN. Likely produced by the cookbook defaults (M2) | desktop launcher | DEPLOYMENT_GUIDE Step 1b |
 | M1 | MEDIUM | Mesh peer server binds `0.0.0.0` and **falls back to plaintext** when certs are missing ("running without TLS"); its handlers include memory store | `src/abl/peer/__main__.py:160-175` | fix below |
@@ -35,8 +35,31 @@ In `src/abl/web/app.py`:
 None of these routes check anything. `src/abl/web/auth.py::DashboardAuth` (token, 24 h sessions,
 `~/.abl/dashboard_token`) is referenced **nowhere** outside its own file.
 
-**Impact:** any device on the LAN (or a malicious page in a LAN browser, via DNS rebinding or a simple form POST)
-can approve a pending Borea tool execution and bypass the 3/3 consensus the whole architecture rests on.
+**Impact (corrected after tracing the wiring):** orchestrator step 11 calls `create_app(...)` **without**
+`consensus_manager`, so in production `/proposals/{id}/approve` currently answers 404. The approve-bypass is **latent**:
+one wiring line (this codebase's own "capability-built-wiring-missing" pattern) turns it into a 3/3-consensus bypass.
+What is **live** today: `POST /chat/send` (operator messages, HMAC-signed by the server) and `WS /chat/stream` /
+`GET /chat/history` (every agent message, including Lis memory context, so personal data) are open to any LAN device,
+or to a page in a LAN browser via a cross-site form POST.
+
+### Ready-to-apply fix (tested)
+`patches/abl_h1_dashboard_auth.patch` (against `insomniac-asif/abl` @ `48b6289`; 3 files, +200/−5):
+- `create_app(..., auth=DashboardAuth)`: middleware requires a session cookie (`HttpOnly`, `SameSite=Strict`) or
+  `Authorization: Bearer <token>` on every route except `GET /system/health`, `GET /login` and `POST /auth/login`. The chat websocket
+  is closed with code 4401 **before** `accept()`. `/chat/send` pins `user_id`/`user_role` server-side.
+- The orchestrator always injects `DashboardAuth(~/.abl/dashboard_token)`, and binds `ABL_WEB_HOST` (default **127.0.0.1**)
+  for both the BL-120 pre-flight probe and uvicorn.
+- `tests/test_v016_h1_dashboard_auth.py`: 15 tests. These are behaviour tests (401s, login cookie flags, bearer, websocket refusal)
+  plus AST invariants (orchestrator always passes `auth=`; no literal `"0.0.0.0"` in orchestrator.py). All 15 **fail on
+  the unpatched code**. 146 of the existing web tests still pass; the only failures are the same `chromadb`/`typer` import errors the
+  unpatched baseline shows in this environment.
+```bash
+cd ~/abl && git checkout -b fix/h1-dashboard-auth
+git am ~/abl-cloud-session/patches/abl_h1_dashboard_auth.patch      # or: git apply
+pytest -q tests/test_v016_h1_dashboard_auth.py tests/test_dashboard.py tests/test_v014_web_chat_roundtrip.py
+cat ~/.abl/dashboard_token            # sign in once at http://127.0.0.1:8081/login (or the tailnet IP via ABL_WEB_HOST)
+```
+The design notes below are kept for reference.
 
 **Fix (exact):**
 ```python
