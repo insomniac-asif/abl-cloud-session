@@ -121,3 +121,35 @@ BUG_FIXES B7. Spec §7's offline buffer is now 30 s, matching the implementation
 
 **New decisions for Asif:** `quiet.yellow_policy` hold vs send; quiet-hours breakthrough scope;
 whether `money` may be lowered to YELLOW; the 8 desktop autopilot system names; and the ears tunnel port (7800 as asked, or 17800 as recommended).
+
+---
+
+## Third batch (PR #3, same session)
+
+| Item | Deliverable | Tests |
+|---|---|---|
+| Settings panel plugin | `plugins/dsh-abl-settings-r1`: `package.json`, `cordis.patch.yml`, server `index.mjs`, `client.js`, `schema.mjs`, built against the published deepseek-harness contracts. It's the single writer of `settings.json` (atomic, versioned 409, validated 422, undo, audit, corrupt-file refusal) | 19 node |
+| Settings reader | `src/abl_settings.py`: cached reads, floors, `quiet_now()`; defaults pinned to `schema.mjs` | 14 |
+| Autoresponder ← settings | mode/tiers/channels/hold come from settings.json > env > default, with floors always re-applied; **YELLOW drafts created in quiet hours wait until morning** | +6 |
+| Email classifier | `src/alert_rules.py`: 17 rules, each returning (tier, category, evidence). Covers spoofing, lookalikes, auth failures, link mismatch, risky attachments; extracts amounts, due dates and tracking; codes masked | 29 |
+| Morning briefing | `src/morning_briefing_abl1.py`: weather, overnight mail, autopilot recap, bills due, calendar, rendered as JSON plus TTS lines | 9 |
+| Spending summary | `src/finance_voice_abl1.py`: bank/P2P alert parsing, daily summary, no egress, phishing excluded | 13 |
+| Deployment | `DEPLOYMENT_GUIDE.md` (11 steps, verify + rollback each), `deploy/systemd/*` timers, `abl1.env.example`; the deploy script installs every abl1 module and runs its tests in-tree | e2e run |
+| Security | `reports/SECURITY_SCAN.md` + `tools/security_audit_abl1.sh` (read-only, on-box) | n/a |
+
+**Bugs found and fixed along the way:**
+- The autoresponder's file loader failed on any `alert_rules.py` that uses `@dataclass`. It now registers the module before exec.
+- An explicit `ABL_ALERT_RULES_PATH` was ignored once another `alert_rules` module was importable. The explicit path now wins.
+- The phishing rule missed bait carried in an attachment's *filename*. It now checks the name too.
+- Year-less due dates used a parsing form that Python 3.15 deprecates. They now parse with the reference year.
+- Timer tests depended on the wall clock once quiet hours existed. They now use an isolated settings file.
+- The settings parity test assumed the repo layout. It now locates `schema.mjs` (the in-tree deploy run caught this).
+
+**Security, act today:**
+- **H1:** the ABL core dashboard (`0.0.0.0:8081`) lets anyone on the LAN list and *approve* agent proposals, bypassing 3/3 consensus, and inject operator chat. `DashboardAuth` exists but was never wired in.
+- **H2:** `gpuctl` (`0.0.0.0:7900`) embeds its control token in an unauthenticated page.
+- **H3:** the Windows 35B is bound to `0.0.0.0`.
+
+Exact fixes for all three are in `reports/SECURITY_SCAN.md`. No real secrets were found in tracked files.
+
+**Totals:** 238 Python tests + 19 node tests passing; pyflakes clean.
