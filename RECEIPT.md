@@ -34,7 +34,7 @@ to them is written as tolerant adapters, with one place to adjust each.
 6. **Hash-only JSONL audit** (same convention as the egress gateway). Drafts are scrubbed once resolved.
 7. **Non-blocking.** HTTP routes run model calls in the threadpool, so a slow 27B can't stall the backend.
 
-Category → tier defaults: fraud, security, money, bills → **RED**; people → **YELLOW**; food, parcels → **GREEN**. Override with `ABL_AUTORESPONDER_TIERS`.
+Category → tier defaults: fraud, security, money → **RED**; bills, people → **YELLOW** (bills moved from RED per Asif, 2026-11-03: 60 s review window); food, parcels → **GREEN**. A bill that also asks for money ("send $120 via Zelle") is still RED because the money rule wins. Override with `ABL_AUTORESPONDER_TIERS`.
 
 ## What was tested
 
@@ -66,7 +66,7 @@ bash deploy/deploy_abl1.sh --apply    # installs the autoresponder files + docs,
 
 ## Questions and decisions for Asif before deployment
 
-1. **Autoresponder tiers.** Are bills RED (alert only) or YELLOW (draft + timer)? People YELLOW, food/parcels GREEN: confirm. Also compare against `AUTORESPONDER_SPEC.md`, which wasn't readable from the cloud.
+1. **Autoresponder tiers.** ~~Bills~~ resolved: YELLOW. People YELLOW, food/parcels GREEN: confirm. Also compare against `AUTORESPONDER_SPEC.md`, which wasn't readable from the cloud.
 2. **DeepSeek for personal messages.** The strict policy means most real messages from people will be triaged **locally** even when DeepSeek is configured. That is deliberate (personal content stays local). Do you want that, or to allow hosted triage in egress `audit` mode?
 3. **Which channel goes live first**, and what's the auto-reply signature? (Default suffix: "— (auto-reply from Asif's assistant)".)
 4. **Who sends?** The autoresponder needs a `sender_fn` per channel (SMS/Discord/email). None is wired yet, which is fine for shadow/draft mode.

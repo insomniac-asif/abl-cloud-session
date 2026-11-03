@@ -126,9 +126,31 @@ def test_red_rule_skips_all_models():
     assert v.backends_tried == []
 
 
-def test_bills_red_normal_priority():
+def test_bills_are_yellow_held_for_review():
+    """Asif 2026-11-03: bills get a 60 s review window (YELLOW), not alert-only."""
     v = ar.jev_classify("Your statement is ready. Minimum payment due on Friday.", "bank", "email", chain=[])
-    assert v.tier is Tier.RED and v.alert_priority == "normal"
+    assert v.tier is Tier.YELLOW and v.action == "hold" and v.alert_priority is None
+
+
+def test_bill_with_money_ask_still_red():
+    v = ar.jev_classify("Your bill is past due, send $120 via Zelle today", "+15550001234", "sms", chain=[])
+    assert v.tier is Tier.RED and {"bills", "money"} <= set(v.categories)
+
+
+def test_bill_model_draft_is_dropped_by_draft_check():
+    """A model draft that itself talks about the bill/payment is never sent; held without a draft."""
+    v = ar.jev_classify("Your electric bill is ready", "utility", "email",
+                        chain=[("local", model(jv("GREEN", "Thanks, autopay will cover the payment due")))])
+    assert v.tier is Tier.YELLOW and v.draft is None
+
+
+def test_bills_yellow_draft_mode_holds_60s(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABL_AUTORESPONDER_MODE", "draft")
+    r = _responder(tmp_path, [("local", model(jv("YELLOW", "Got it, thanks.")))])
+    out = r.handle("Your electric bill is ready", "utility", "email")
+    assert out["effect"] == "held"
+    it = r.queue.get(out["pending_id"])
+    assert 55 <= it["due_at"] - it["created"] <= 65 and it["categories"] == ["bills"]
 
 
 # ── unmatched messages ───────────────────────────────────────────────────────
@@ -420,9 +442,9 @@ def test_broken_alert_rules_does_not_break_triage(tmp_path, monkeypatch):
 
 
 def test_category_tier_override(monkeypatch):
-    monkeypatch.setenv("ABL_AUTORESPONDER_TIERS", json.dumps({"bills": "YELLOW"}))
+    monkeypatch.setenv("ABL_AUTORESPONDER_TIERS", json.dumps({"bills": "RED"}))
     v = ar.jev_classify("Your electric bill is ready", "utility", "email", chain=[])
-    assert v.tier is Tier.YELLOW
+    assert v.tier is Tier.RED
 
 
 def test_known_contacts_env(monkeypatch):

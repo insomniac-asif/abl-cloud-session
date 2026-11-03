@@ -7,7 +7,7 @@ Every inbound message (SMS, email, Discord DM, voice note transcript, ...) is tr
           ``live`` mode) or a non-reply action (announce on the speaker, log).
   YELLOW  draft a reply and hold it on a 60 s timer. Asif can cancel or approve early;
           if nobody intervenes the draft is released when the timer expires.
-  RED     alert only. ABL never replies. Fraud, security codes, money, bills.
+  RED     alert only. ABL never replies. Fraud, security codes, money.
 
 DESIGN INVARIANTS (the tests in tests/test_autoresponder.py pin every one of these):
 
@@ -136,12 +136,12 @@ DEFAULT_CHAIN = "jev,deepseek,local,light"
 DEFAULT_HOLD_SECONDS = 60
 
 # alert_rules.py categories → tier. Overridable with ABL_AUTORESPONDER_TIERS (JSON
-# object, e.g. '{"bills": "YELLOW"}'). Unknown categories default to YELLOW.
+# object, e.g. '{"bills": "RED"}'). Unknown categories default to YELLOW.
 DEFAULT_CATEGORY_TIERS: dict[str, Tier] = {
     "fraud": Tier.RED,
     "security": Tier.RED,
     "money": Tier.RED,
-    "bills": Tier.RED,
+    "bills": Tier.YELLOW,       # Asif 2026-11-03: 60 s review window before anything is acked
     "people": Tier.YELLOW,
     "food": Tier.GREEN,
     "parcels": Tier.GREEN,
@@ -489,7 +489,7 @@ CLASSIFY_SYSTEM = (
     '{"tier": "GREEN|YELLOW|RED", "categories": [..], "reason": "<12 words>", "draft": "<reply or empty>"}\n'
     "Tiers: GREEN = routine, safe to auto-handle (greetings, logistics, delivery notices). "
     "YELLOW = a person expects a reply that Asif should glance at (plans, questions, feelings). "
-    "RED = never reply: money, payments, bills, codes, passwords, security, legal, medical, "
+    "RED = never reply: money transfers, payments, codes, passwords, security, legal, medical, "
     "scams, anything urgent or unusual.\n"
     "Categories come from: fraud, security, money, bills, food, parcels, people, other.\n"
     "The draft is a short, warm, non-committal reply in Asif's voice: no promises, no money, "
@@ -1131,7 +1131,7 @@ SELF_TEST_CASES: list[tuple[str, Any, str, Tier]] = [
     ("Your Chase verification code is 482913. Do not share this code.", "72345", "sms", Tier.RED),
     ("URGENT: your account has been suspended, verify your account at http://bit.ly/x", "+18885550100", "sms", Tier.RED),
     ("Can you send me $40 on venmo for the tickets?", {"id": "+15551112222", "name": "Sam", "known": True}, "sms", Tier.RED),
-    ("Your electric bill is ready. Payment due on Nov 15.", "billing@utility.example", "email", Tier.RED),
+    ("Your electric bill is ready. Payment due on Nov 15.", "billing@utility.example", "email", Tier.YELLOW),
     ("Your DoorDash order has arrived! Dasher left it at the door.", "doordash", "sms", Tier.GREEN),
     ("Your package was delivered to the front porch.", "amazon", "sms", Tier.GREEN),
     ("hey are we still on for dinner tomorrow?", {"id": "+15553334444", "name": "Mom", "known": True, "relation": "family"}, "sms", Tier.YELLOW),
