@@ -1,0 +1,13 @@
+[Unit]
+Description=ABL morning briefing (abl1) -> data/abl/briefing/latest.json
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/abl/odysseus
+EnvironmentFile=-%h/.config/abl/abl1.env
+ExecStart=%h/abl/odysseus/venv/bin/python -m src.morning_briefing_abl1
+Nice=10
+MemoryMax=300M
+TimeoutStartSec=120

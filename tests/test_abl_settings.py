@@ -32,11 +32,21 @@ def write(p, values, version=1):
     s.reset_cache()
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def _schema_path():
+    import os
+    for cand in (os.environ.get("ABL_SETTINGS_SCHEMA"), ROOT / "plugins" / "dsh-abl-settings-r1" / "schema.mjs",
+                 Path.home() / "abl/tools/dsh/app/local-plugins/dsh-abl-settings-r1/schema.mjs"):
+        if cand and Path(cand).is_file():
+            return Path(cand).resolve()
+    return None
+
+
+@pytest.mark.skipif(shutil.which("node") is None or _schema_path() is None,
+                    reason="node or the plugin's schema.mjs not available (set ABL_SETTINGS_SCHEMA)")
 def test_defaults_match_plugin_schema():
-    js = ("import { buildSchema } from './plugins/dsh-abl-settings-r1/schema.mjs';"
+    js = (f"import {{ buildSchema }} from {json.dumps(_schema_path().as_uri())};"
           "console.log(JSON.stringify(Object.fromEntries(buildSchema().map(f => [f.key, f.default]))))")
-    out = subprocess.run(["node", "--input-type=module", "-e", js], cwd=ROOT, capture_output=True, text=True, check=True)
+    out = subprocess.run(["node", "--input-type=module", "-e", js], capture_output=True, text=True, check=True)
     assert json.loads(out.stdout) == s.DEFAULTS
 
 
