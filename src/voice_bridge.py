@@ -43,7 +43,8 @@ Stdlib only (the desktop speaker venv may be minimal). Usage:
   python voice_bridge.py --health                 # probe all endpoints, print JSON
   python voice_bridge.py --send clip.wav          # one-shot send, print the result
   python voice_bridge.py --watch                  # live health table every 5 s
-In ears.py:  see patches/ears_voice_target.patch (BRIDGE.send_audio(wav_bytes)).
+In ears.py:  patches/patch_ears.py rewires the existing calls through live() + auth_headers();
+for buffering/failover-safe sends use get_bridge().send_audio(wav_bytes). See patches/EARS_PATCH.md.
 """
 from __future__ import annotations
 
@@ -435,6 +436,65 @@ class VoiceBridge:
 
     def stop(self) -> None:
         self._stop.set()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Drop-in helpers for legacy callers (used by the ears.py patch)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SINGLETON: Optional[VoiceBridge] = None
+_SINGLETON_LOCK = threading.Lock()
+
+
+def get_bridge() -> VoiceBridge:
+    """Process-wide bridge with its background health loop running (lazy)."""
+    global _SINGLETON
+    with _SINGLETON_LOCK:
+        if _SINGLETON is None:
+            _SINGLETON = VoiceBridge()
+            _SINGLETON.check_all()                 # one synchronous probe so the first call routes well
+            _SINGLETON.start(interval_s=float(os.environ.get("ABL_VOICE_HEALTH_INTERVAL", "10")))
+        return _SINGLETON
+
+
+def resolve_base() -> str:
+    """Base URL to use RIGHT NOW: the highest-priority healthy target (tailnet, then
+    tunnel). If nothing is healthy yet, the primary, so the caller's own error handling
+    applies and the health loop keeps probing for recovery."""
+    b = get_bridge()
+    return b.active_endpoint() or b.endpoints[0].base
+
+
+LEGACY_BASES = ("localhost:7800", "127.0.0.1:7800")
+
+
+def live(url: str) -> str:
+    """Map a legacy ``http://localhost:7800/...`` (or any configured target) URL onto the
+    endpoint that is healthy right now; other URLs pass through untouched."""
+    try:
+        p = urllib.parse.urlparse(str(url))
+    except ValueError:
+        return url
+    netloc = (p.netloc or "").lower()
+    bases = {urllib.parse.urlparse(e.base).netloc.lower() for e in get_bridge().endpoints} | set(LEGACY_BASES)
+    if netloc not in bases:
+        return url
+    rest = urllib.parse.urlunparse(("", "", p.path, p.params, p.query, p.fragment))
+    return resolve_base().rstrip("/") + rest
+
+
+def auth_headers() -> dict:
+    """{'Authorization': 'Bearer …'} for abl1, or {} if no token is configured."""
+    tok = get_bridge()._token
+    return {"Authorization": f"Bearer {tok}"} if tok else {}
+
+
+def _reset_singleton_for_test() -> None:
+    global _SINGLETON
+    with _SINGLETON_LOCK:
+        if _SINGLETON is not None:
+            _SINGLETON.stop()
+        _SINGLETON = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
